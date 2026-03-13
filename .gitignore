@@ -133,3 +133,10 @@ Thumbs.db
 *.log
 backup/
 test_movies/
+
+# Movie renamer temporary files
+*_test.txt
+test_*.txt
+movielist.txt
+backlog*.txt
+*.movielist
