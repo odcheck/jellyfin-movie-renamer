@@ -15,6 +15,21 @@ from bs4 import BeautifulSoup
 from urllib.parse import quote_plus
 import shutil
 
+def transliterate_german(text):
+    """Transliterate German umlauts and ß to ASCII equivalents"""
+    transliterations = {
+        'ä': 'ae',
+        'ö': 'oe', 
+        'ü': 'ue',
+        'Ä': 'Ae',
+        'Ö': 'Oe',
+        'Ü': 'Ue',
+        'ß': 'ss'
+    }
+    for char, replacement in transliterations.items():
+        text = text.replace(char, replacement)
+    return text
+
 # Parse command-line arguments
 parser = argparse.ArgumentParser(description='Movie Folder Renamer for Jellyfin')
 parser.add_argument('--input', type=str, help='Read movies from input file')
@@ -56,14 +71,17 @@ def has_year_in_folder_name(folder_name):
     """Check if folder name contains a year in parentheses"""
     return bool(re.search(r'\(\d{4}\)', folder_name))
 
-def search_imdb(movie_title, original_name):
+def search_imdb(original_folder_name, folder_name_for_year):
     """Search IMDB for movie and return result with year and ID, or None if ambiguous"""
     try:
+        # Clean the search term for IMDB lookup
+        search_base = clean_search_term(original_folder_name)
+        
         # Try multiple search strategies
         search_terms = [
-            movie_title,  # Original cleaned title
-            movie_title.split(' - ')[0].strip(),  # First part before dash
-            ' '.join(movie_title.split()[:3]),  # First 3 words
+            search_base,  # Cleaned title
+            search_base.split(' - ')[0].strip(),  # First part before dash
+            ' '.join(search_base.split()[:3]),  # First 3 words
         ]
         
         all_results = []
@@ -208,12 +226,12 @@ def search_imdb(movie_title, original_name):
         
         # Check for ambiguity
         years = set(r['year'] for r in all_results)
-        has_year_in_name = has_year_in_folder_name(original_name)
+        has_year_in_name = has_year_in_folder_name(folder_name_for_year)
         
         if len(all_results) > 1 and len(years) > 1:
             if has_year_in_name:
                 # Extract year from folder name
-                year_match = re.search(r'\((\d{4})\)', original_name)
+                year_match = re.search(r'\((\d{4})\)', folder_name_for_year)
                 if year_match:
                     target_year = year_match.group(1)
                     # Find matching result
@@ -290,14 +308,19 @@ def scan_directory_for_movies(base_dir):
     return movies
 
 def get_video_files(folder_path):
-    """Get video files from folder"""
+    """Get video files from folder and subfolders, return list of (relative_path, filename) tuples"""
     video_extensions = {'.mkv', '.mp4', '.avi', '.mov', '.wmv', '.flv', '.webm', '.m4v'}
     video_files = []
     
     try:
-        for file in os.listdir(folder_path):
-            if any(file.lower().endswith(ext) for ext in video_extensions):
-                video_files.append(file)
+        for root, dirs, files in os.walk(folder_path):
+            for file in files:
+                if any(file.lower().endswith(ext) for ext in video_extensions):
+                    # Get relative path from folder_path
+                    rel_path = os.path.relpath(root, folder_path)
+                    if rel_path == '.':
+                        rel_path = ''
+                    video_files.append((rel_path, file))
     except OSError:
         pass
         
@@ -310,6 +333,12 @@ def create_folder_name(original_name, movie_info):
     
     # Remove existing year if present
     title = re.sub(r'\s*\(\d{4}\)\s*', '', title).strip()
+    
+    # Remove extra tags like [SD] [PG] [voted_*] [genre]
+    title = re.sub(r'\s*\[.*?\]', '', title)
+    
+    # Apply German transliteration
+    title = transliterate_german(title)
     
     # Replace spaces with underscores in title part only
     title = title.replace(' ', '_')
@@ -333,12 +362,11 @@ def rename_movie_folder(folder_name):
         print(f"  Folder not found: {folder_path}")
         return False
     
-    # Clean search term
-    search_term = clean_search_term(folder_name)
-    print(f"  Searching IMDB for: '{search_term}'")
+    # Use original folder name for IMDB search
+    print(f"  Searching IMDB for: '{folder_name}'")
     
     # Search IMDB
-    movie_info = search_imdb(search_term, folder_name)
+    movie_info = search_imdb(folder_name, folder_name)
     if not movie_info:
         print(f"  Skipping: Could not find match on IMDB")
         return False
@@ -349,40 +377,76 @@ def rename_movie_folder(folder_name):
     
     print(f"  New folder name: {new_folder_name}")
     
-    # Get video files
+    # Get video files (now returns list of (rel_path, filename) tuples)
     video_files = get_video_files(folder_path)
-    print(f"  Found {len(video_files)} video file(s): {video_files}")
+    print(f"  Found {len(video_files)} video file(s)")
+    for rel_path, filename in video_files:
+        if rel_path:
+            print(f"    {rel_path}/{filename}")
+        else:
+            print(f"    {filename}")
     
+    # Always rename folder if we have movie info
     if DRY_RUN:
         print("  [DRY RUN] Would rename folder and video files")
         print(f"    Folder: {folder_name} -> {new_folder_name}")
-        for video_file in video_files:
-            # Get file extension
-            _, ext = os.path.splitext(video_file)
-            new_video_name = create_video_name(new_folder_name, movie_info, ext)
-            print(f"    Video: {video_file} -> {new_video_name}")
+        
+        # Sort all video files and assign cd numbers sequentially
+        all_video_files = sorted(video_files, key=lambda x: (x[0], x[1]))  # Sort by path, then filename
+        
+        for idx, (rel_path, filename) in enumerate(all_video_files):
+            _, ext = os.path.splitext(filename)
+            suffix = f" - cd{idx + 1}" if len(all_video_files) > 1 else ""
+            new_video_name = f"{create_video_name(new_folder_name, movie_info, ext)}{suffix}"
+            if rel_path:
+                print(f"    Move and rename: {rel_path}/{filename} -> {new_video_name}")
+            else:
+                print(f"    Rename: {filename} -> {new_video_name}")
     else:
         try:
             # Rename folder
             shutil.move(folder_path, new_folder_path)
             print(f"  Renamed folder: {folder_name} -> {new_folder_name}")
             
-            # Rename video files
-            for video_file in video_files:
-                old_video_path = os.path.join(new_folder_path, video_file)
-                _, ext = os.path.splitext(video_file)
-                new_video_name = create_video_name(new_folder_name, movie_info, ext)
+            # Sort all video files and assign cd numbers sequentially
+            all_video_files = sorted(video_files, key=lambda x: (x[0], x[1]))  # Sort by path, then filename
+            
+            subfolders_to_remove = set()
+            
+            for idx, (rel_path, filename) in enumerate(all_video_files):
+                _, ext = os.path.splitext(filename)
+                suffix = f" - cd{idx + 1}" if len(all_video_files) > 1 else ""
+                new_video_name = f"{create_video_name(new_folder_name, movie_info, ext)}{suffix}"
+                
+                # Source path
+                if rel_path:
+                    old_video_path = os.path.join(new_folder_path, rel_path, filename)
+                    subfolders_to_remove.add(os.path.join(new_folder_path, rel_path))
+                else:
+                    old_video_path = os.path.join(new_folder_path, filename)
+                
                 new_video_path = os.path.join(new_folder_path, new_video_name)
                 
                 if os.path.exists(old_video_path):
                     shutil.move(old_video_path, new_video_path)
-                    print(f"    Renamed video: {video_file} -> {new_video_name}")
+                    print(f"    Renamed video: {filename} -> {new_video_name}")
+            
+            # Remove empty subfolders
+            for subfolder_path in sorted(subfolders_to_remove, reverse=True):  # Remove deepest first
+                try:
+                    if not os.listdir(subfolder_path):  # Check if empty
+                        os.rmdir(subfolder_path)
+                        print(f"    Removed empty subfolder: {os.path.basename(subfolder_path)}")
+                except OSError:
+                    pass  # Folder not empty or doesn't exist
                     
         except Exception as e:
             print(f"  Error renaming: {e}")
             return False
     
-    return True
+    # Return True if we renamed the folder, regardless of video files
+    # But we'll handle backlog logic in main()
+    return True, len(video_files) > 0
 
 def main():
     """Main function"""
@@ -431,16 +495,24 @@ def main():
     
     success_count = 0
     skipped_count = 0
+    backlog_count = 0
     skipped_movies = []
+    backlog_movies = []
     
     for i, movie_folder in enumerate(movies_to_process, 1):
         print(f"\n[{i}/{len(movies_to_process)}]", end="")
         
-        if rename_movie_folder(movie_folder):
-            success_count += 1
-        else:
+        result = rename_movie_folder(movie_folder)
+        if result is False:
+            # IMDB lookup failed
             skipped_count += 1
             skipped_movies.append(movie_folder)
+        else:
+            success_count += 1
+            folder_renamed, has_videos = result
+            if not has_videos:
+                backlog_count += 1
+                backlog_movies.append(movie_folder)
             
         # Be respectful to IMDB
         if i < len(movies_to_process):
@@ -451,18 +523,30 @@ def main():
     print("SUMMARY")
     print("=" * 50)
     print(f"Successfully processed: {success_count}")
-    print(f"Skipped: {skipped_count}")
+    print(f"Skipped (no IMDB match): {skipped_count}")
+    print(f"Added to backlog (no videos): {backlog_count}")
     print(f"Total: {len(movies_to_process)}")
     
-    # Write backlog file
-    if skipped_movies:
+    # Write backlog file for movies without video files
+    if backlog_movies:
         try:
             with open(args.backlog_file, 'w') as f:
-                for movie in skipped_movies:
+                for movie in backlog_movies:
                     f.write(movie + '\n')
-            print(f"\nBacklog written to: {args.backlog_file} ({len(skipped_movies)} entries)")
+            print(f"\nBacklog written to: {args.backlog_file} ({len(backlog_movies)} entries - no video files found)")
         except Exception as e:
             print(f"Error writing backlog file: {e}")
+    
+    # Write skipped file for IMDB lookup failures
+    if skipped_movies:
+        try:
+            skipped_file = args.backlog_file.replace('.txt', '_skipped.txt')
+            with open(skipped_file, 'w') as f:
+                for movie in skipped_movies:
+                    f.write(movie + '\n')
+            print(f"Skipped movies written to: {skipped_file} ({len(skipped_movies)} entries - IMDB lookup failed)")
+        except Exception as e:
+            print(f"Error writing skipped file: {e}")
     
     if DRY_RUN:
         print(f"\n⚠️  This was a DRY RUN - no files were actually renamed")
