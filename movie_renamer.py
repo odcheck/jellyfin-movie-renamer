@@ -37,6 +37,7 @@ parser.add_argument('--generate-inputfile-from', type=str, help='Scan directory 
 parser.add_argument('--fileoutput', type=str, default='.', help='Directory to place generated input file (default: current directory)')
 parser.add_argument('--backlog-file', type=str, default='backlog.txt', help='File to write unmatched movies to (default: backlog.txt)')
 parser.add_argument('--execute', action='store_true', help='Actually rename files (disable dry-run)')
+parser.add_argument('--debug', action='store_true', help='Enable verbose IMDB search debugging')
 args = parser.parse_args()
 
 # Configuration
@@ -71,7 +72,7 @@ def has_year_in_folder_name(folder_name):
     """Check if folder name contains a year in parentheses"""
     return bool(re.search(r'\(\d{4}\)', folder_name))
 
-def search_imdb(original_folder_name, folder_name_for_year):
+def search_imdb(original_folder_name, folder_name_for_year, debug=False):
     """Search IMDB for movie and return result with year and ID, or None if ambiguous"""
     try:
         # Clean the search term for IMDB lookup
@@ -90,7 +91,8 @@ def search_imdb(original_folder_name, folder_name_for_year):
             if not search_term.strip():
                 continue
                 
-            print(f"  Trying search: '{search_term}'")
+            if debug:
+                print(f"  Trying search: '{search_term}'")
             
             # Search IMDB
             search_url = f"https://www.imdb.com/find?q={quote_plus(search_term)}&s=tt&ttype=ft"
@@ -106,20 +108,24 @@ def search_imdb(original_folder_name, folder_name_for_year):
             
             # Try the new IMDB structure first (2024)
             title_links = soup.find_all('a', href=re.compile(r'/title/tt\d+/'))
-            print(f"DEBUG: Processing {len(title_links)} title links")
+            if debug:
+                print(f"DEBUG: Processing {len(title_links)} title links")
             
             for i, link in enumerate(title_links[:5]):  # Check first 5 results
                 href = link.get('href', '')
-                print(f"DEBUG: Link {i}: {href}")
+                if debug:
+                    print(f"DEBUG: Link {i}: {href}")
                 title_match = re.search(r'/title/(tt\d+)/', href)
                 
                 if title_match:
                     imdb_id = title_match.group(1)
-                    print(f"DEBUG: Found IMDB ID: {imdb_id}")
+                    if debug:
+                        print(f"DEBUG: Found IMDB ID: {imdb_id}")
                     
                     # Get the movie details from the actual movie page
                     movie_url = f"https://www.imdb.com/title/{imdb_id}/"
-                    print(f"DEBUG: Fetching movie page: {movie_url}")
+                    if debug:
+                        print(f"DEBUG: Fetching movie page: {movie_url}")
                     try:
                         movie_response = requests.get(movie_url, headers=headers, timeout=10)
                         movie_soup = BeautifulSoup(movie_response.content, 'html.parser')
@@ -128,7 +134,8 @@ def search_imdb(original_folder_name, folder_name_for_year):
                         title_elem = movie_soup.find('h1')
                         if title_elem:
                             title_text = title_elem.get_text().strip()
-                            print(f"DEBUG: Found title: {title_text}")
+                            if debug:
+                                print(f"DEBUG: Found title: {title_text}")
                             # Remove "Original title:" prefix if present
                             title_text = re.sub(r'^Original title:\s*', '', title_text)
                             
@@ -147,7 +154,8 @@ def search_imdb(original_folder_name, folder_name_for_year):
                                 elements = movie_soup.find_all(tag, attrs)
                                 for elem in elements:
                                     year_text = elem.get_text().strip()
-                                    print(f"DEBUG: Found year element ({tag}, {attrs}): {year_text}")
+                                    if debug:
+                                        print(f"DEBUG: Found year element ({tag}, {attrs}): {year_text}")
                                     year_match = re.search(r'(\d{4})', year_text)
                                     if year_match:
                                         year = year_match.group(1)
@@ -160,7 +168,8 @@ def search_imdb(original_folder_name, folder_name_for_year):
                                 title_year_match = re.search(r'\((\d{4})\)', title_text)
                                 if title_year_match:
                                     year = title_year_match.group(1)
-                                    print(f"DEBUG: Found year in title: {year}")
+                                    if debug:
+                                        print(f"DEBUG: Found year in title: {year}")
                             
                             # Last resort: search the entire page content for 4-digit years
                             if not year:
@@ -171,7 +180,8 @@ def search_imdb(original_folder_name, folder_name_for_year):
                                     for y in years:
                                         if 1990 <= int(y) <= 2030:
                                             year = y
-                                            print(f"DEBUG: Found year in page content: {year}")
+                                            if debug:
+                                                print(f"DEBUG: Found year in page content: {year}")
                                             break
                             
                             if year:
@@ -181,13 +191,17 @@ def search_imdb(original_folder_name, folder_name_for_year):
                                     'imdb_id': imdb_id
                                 }
                                 all_results.append(result)
-                                print(f"  ✅ Found candidate: {title_text} ({year}) [imdbid-{imdb_id}]")
+                                if debug:
+                                    print(f"  ✅ Found candidate: {title_text} ({year}) [imdbid-{imdb_id}]")
                             else:
-                                print(f"DEBUG: No year found for {title_text}")
+                                if debug:
+                                    print(f"DEBUG: No year found for {title_text}")
                         else:
-                            print("DEBUG: No h1 title found")
+                            if debug:
+                                print("DEBUG: No h1 title found")
                     except Exception as e:
-                        print(f"  Error fetching movie page: {e}")
+                        if debug:
+                            print(f"  Error fetching movie page: {e}")
                         continue
             
             # Fallback to old structure
@@ -217,11 +231,13 @@ def search_imdb(original_folder_name, folder_name_for_year):
                             'imdb_id': imdb_id
                         }
                         all_results.append(result)
-                        print(f"  ✅ Found candidate: {title_clean} ({year}) [imdbid-{imdb_id}]")
+                        if debug:
+                            print(f"  ✅ Found candidate: {title_clean} ({year}) [imdbid-{imdb_id}]")
         
         # Now decide what to return
         if not all_results:
-            print(f"  ❌ No suitable matches found on IMDB for any search term")
+            if debug:
+                print(f"  ❌ No suitable matches found on IMDB for any search term")
             return None
         
         # Check for ambiguity
@@ -237,21 +253,26 @@ def search_imdb(original_folder_name, folder_name_for_year):
                     # Find matching result
                     for result in all_results:
                         if result['year'] == target_year:
-                            print(f"  Selected version matching folder year ({target_year}): {result['title']} ({result['year']})")
+                            if debug:
+                                print(f"  Selected version matching folder year ({target_year}): {result['title']} ({result['year']})")
                             return result
-                    print(f"  No IMDB result matches the year in folder name ({target_year}). Skipping.")
+                    if debug:
+                        print(f"  No IMDB result matches the year in folder name ({target_year}). Skipping.")
                     return None
             else:
-                print(f"  Multiple versions found with different years {sorted(years)}, but no year in folder name. Skipping to avoid ambiguity.")
+                if debug:
+                    print(f"  Multiple versions found with different years {sorted(years)}, but no year in folder name. Skipping to avoid ambiguity.")
                 return None
         else:
             # Single result or all same year - return first
             result = all_results[0]
-            print(f"  Selected: {result['title']} ({result['year']}) [imdbid-{result['imdb_id']}]")
+            if debug:
+                print(f"  Selected: {result['title']} ({result['year']}) [imdbid-{result['imdb_id']}]")
             return result
         
     except Exception as e:
-        print(f"  Error searching IMDB: {e}")
+        if debug:
+            print(f"  Error searching IMDB: {e}")
         return None
 
 def debug_imdb_search(movie_title):
@@ -351,7 +372,7 @@ def create_video_name(folder_name, movie_info, extension):
     # Video file format: Title (year) [imdbid-ttXXXXXX].ext
     return f"{folder_name} [imdbid-{movie_info['imdb_id']}]{extension}"
 
-def rename_movie_folder(folder_name):
+def rename_movie_folder(folder_name, debug=False):
     """Process and rename a single movie folder"""
     print(f"\nProcessing: {folder_name}")
     
@@ -363,12 +384,14 @@ def rename_movie_folder(folder_name):
         return False
     
     # Use original folder name for IMDB search
-    print(f"  Searching IMDB for: '{folder_name}'")
+    if debug:
+        print(f"  Searching IMDB for: '{folder_name}'")
     
     # Search IMDB
-    movie_info = search_imdb(folder_name, folder_name)
+    movie_info = search_imdb(folder_name, folder_name, debug=debug)
     if not movie_info:
-        print(f"  Skipping: Could not find match on IMDB")
+        if debug:
+            print(f"  Skipping: Could not find match on IMDB")
         return False
     
     # Create new folder name (without IMDB ID)
@@ -502,7 +525,7 @@ def main():
     for i, movie_folder in enumerate(movies_to_process, 1):
         print(f"\n[{i}/{len(movies_to_process)}]", end="")
         
-        result = rename_movie_folder(movie_folder)
+        result = rename_movie_folder(movie_folder, debug=args.debug)
         if result is False:
             # IMDB lookup failed
             skipped_count += 1
