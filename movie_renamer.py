@@ -51,13 +51,17 @@ def clean_search_term(folder_name):
     # Remove year if already present
     clean_name = re.sub(r'\s*\(\d{4}\)\s*', ' ', clean_name)
     
-    # Remove common suffixes but preserve German content
+    # Remove common German suffixes and indicators
     clean_name = re.sub(r'\s*-.*German.*$', '', clean_name, flags=re.IGNORECASE)
+    clean_name = re.sub(r'\s*-.*Dubbed.*$', '', clean_name, flags=re.IGNORECASE)
+    clean_name = re.sub(r'\s*-.*Uncut.*$', '', clean_name, flags=re.IGNORECASE)
+    clean_name = re.sub(r'\s*-.*Director.*$', '', clean_name, flags=re.IGNORECASE)
     clean_name = re.sub(r'\s*\[.*\]', '', clean_name)
     
     # Clean up dots and special characters
     clean_name = clean_name.replace('.', ' ')
     clean_name = clean_name.replace('-', ' ')
+    clean_name = clean_name.replace('_', ' ')
     clean_name = re.sub(r'\s+', ' ', clean_name.strip())
     
     return clean_name
@@ -65,51 +69,194 @@ def clean_search_term(folder_name):
 def search_imdb(movie_title):
     """Search IMDB for movie and return first result with year and ID"""
     try:
-        # Search IMDB
+        # Try multiple search strategies
+        search_terms = [
+            movie_title,  # Original cleaned title
+            movie_title.split(' - ')[0].strip(),  # First part before dash
+            ' '.join(movie_title.split()[:3]),  # First 3 words
+        ]
+        
+        for search_term in search_terms:
+            if not search_term.strip():
+                continue
+                
+            print(f"  Trying search: '{search_term}'")
+            
+            # Search IMDB
+            search_url = f"https://www.imdb.com/find?q={quote_plus(search_term)}&s=tt&ttype=ft"
+            
+            headers = {
+                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'
+            }
+            
+            response = requests.get(search_url, headers=headers, timeout=10)
+            response.raise_for_status()
+            
+            soup = BeautifulSoup(response.content, 'html.parser')
+            
+            # Try the new IMDB structure first (2024)
+            title_links = soup.find_all('a', href=re.compile(r'/title/tt\d+/'))
+            print(f"DEBUG: Processing {len(title_links)} title links")
+            
+            for i, link in enumerate(title_links[:3]):  # Check first 3 results
+                href = link.get('href', '')
+                print(f"DEBUG: Link {i}: {href}")
+                title_match = re.search(r'/title/(tt\d+)/', href)
+                
+                if title_match:
+                    imdb_id = title_match.group(1)
+                    print(f"DEBUG: Found IMDB ID: {imdb_id}")
+                    
+                    # Get the movie details from the actual movie page
+                    movie_url = f"https://www.imdb.com/title/{imdb_id}/"
+                    print(f"DEBUG: Fetching movie page: {movie_url}")
+                    try:
+                        movie_response = requests.get(movie_url, headers=headers, timeout=10)
+                        movie_soup = BeautifulSoup(movie_response.content, 'html.parser')
+                        
+                        # Try to find the title and year
+                        title_elem = movie_soup.find('h1')
+                        if title_elem:
+                            title_text = title_elem.get_text().strip()
+                            print(f"DEBUG: Found title: {title_text}")
+                            # Remove "Original title:" prefix if present
+                            title_text = re.sub(r'^Original title:\s*', '', title_text)
+                            
+                            # Look for year in various places
+                            year = None
+                            
+                            # Try different selectors for year
+                            year_selectors = [
+                                ('span', {'class': re.compile(r'year')}),
+                                ('span', {'id': re.compile(r'titleYear')}),
+                                ('a', {'href': re.compile(r'/year/\d+')}),
+                                ('li', {'data-testid': 'title-details-releasedate'}),
+                            ]
+                            
+                            for tag, attrs in year_selectors:
+                                elements = movie_soup.find_all(tag, attrs)
+                                for elem in elements:
+                                    year_text = elem.get_text().strip()
+                                    print(f"DEBUG: Found year element ({tag}, {attrs}): {year_text}")
+                                    year_match = re.search(r'(\d{4})', year_text)
+                                    if year_match:
+                                        year = year_match.group(1)
+                                        break
+                                if year:
+                                    break
+                            
+                            # Also try looking in the title itself for year
+                            if not year:
+                                title_year_match = re.search(r'\((\d{4})\)', title_text)
+                                if title_year_match:
+                                    year = title_year_match.group(1)
+                                    print(f"DEBUG: Found year in title: {year}")
+                            
+                            # Last resort: search the entire page content for 4-digit years
+                            if not year:
+                                page_text = movie_soup.get_text()
+                                years = re.findall(r'\b(19|20)\d{2}\b', page_text)
+                                if years:
+                                    # Take the first reasonable year (prefer 1990s-2020s)
+                                    for y in years:
+                                        if 1990 <= int(y) <= 2030:
+                                            year = y
+                                            print(f"DEBUG: Found year in page content: {year}")
+                                            break
+                            
+                            if year:
+                                print(f"  ✅ Found: {title_text} ({year}) [imdbid-{imdb_id}]")
+                                return {
+                                    'title': title_text,
+                                    'year': year,
+                                    'imdb_id': imdb_id
+                                }
+                            else:
+                                print(f"DEBUG: No year found for {title_text}")
+                        else:
+                            print("DEBUG: No h1 title found")
+                    except Exception as e:
+                        print(f"  Error fetching movie page: {e}")
+                        continue
+            
+            # Fallback to old structure
+            results = soup.find_all('td', class_='result_text')
+            
+            for result in results:
+                link = result.find('a')
+                if not link:
+                    continue
+                    
+                href = link.get('href', '')
+                title_match = re.search(r'/title/(tt\d+)/', href)
+                
+                if title_match:
+                    imdb_id = title_match.group(1)
+                    title_text = result.get_text()
+                    
+                    # Extract year
+                    year_match = re.search(r'\((\d{4})\)', title_text)
+                    if year_match:
+                        year = year_match.group(1)
+                        title_clean = re.sub(r'\s*\(\d{4}\).*$', '', link.get_text()).strip()
+                        
+                        print(f"  ✅ Found: {title_clean} ({year}) [imdbid-{imdb_id}]")
+                        return {
+                            'title': title_clean,
+                            'year': year,
+                            'imdb_id': imdb_id
+                        }
+        
+        print(f"  ❌ No suitable match found on IMDB for any search term")
+        # Debug the search
+        debug_content = debug_imdb_search(search_terms[0])
+        if debug_content:
+            print("DEBUG: Response content preview:")
+            print(debug_content.decode('utf-8', errors='ignore')[:500])
+        return None
+        
+    except Exception as e:
+        print(f"  Error searching IMDB: {e}")
+        return None
+
+def debug_imdb_search(movie_title):
+    """Debug IMDB search to see what we get"""
+    try:
         search_url = f"https://www.imdb.com/find?q={quote_plus(movie_title)}&s=tt&ttype=ft"
+        print(f"DEBUG: Searching URL: {search_url}")
         
         headers = {
             'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'
         }
         
         response = requests.get(search_url, headers=headers, timeout=10)
-        response.raise_for_status()
+        print(f"DEBUG: Response status: {response.status_code}")
         
         soup = BeautifulSoup(response.content, 'html.parser')
         
-        # Look for movie results
+        # Look for different possible result structures
         results = soup.find_all('td', class_='result_text')
+        print(f"DEBUG: Found {len(results)} result_text elements")
         
-        for result in results:
-            link = result.find('a')
-            if not link:
-                continue
-                
-            href = link.get('href', '')
-            title_match = re.search(r'/title/(tt\d+)/', href)
+        if results:
+            print("DEBUG: First result text:", results[0].get_text()[:200])
+            link = results[0].find('a')
+            if link:
+                print("DEBUG: First link href:", link.get('href'))
+        
+        # Also try finding any links with title patterns
+        title_links = soup.find_all('a', href=re.compile(r'/title/tt\d+/'))
+        print(f"DEBUG: Found {len(title_links)} title links")
+        if title_links:
+            print("DEBUG: First title link:", title_links[0].get('href'))
+            print("DEBUG: First title text:", title_links[0].get_text().strip())
+            print("DEBUG: First title parent:", title_links[0].parent.get_text()[:200] if title_links[0].parent else "No parent")
+            print("DEBUG: First title grandparent:", title_links[0].parent.parent.get_text()[:200] if title_links[0].parent and title_links[0].parent.parent else "No grandparent")
             
-            if title_match:
-                imdb_id = title_match.group(1)
-                title_text = result.get_text()
-                
-                # Extract year
-                year_match = re.search(r'\((\d{4})\)', title_text)
-                if year_match:
-                    year = year_match.group(1)
-                    title_clean = re.sub(r'\s*\(\d{4}\).*$', '', link.get_text()).strip()
-                    
-                    print(f"  Found: {title_clean} ({year}) [imdbid-{imdb_id}]")
-                    return {
-                        'title': title_clean,
-                        'year': year,
-                        'imdb_id': imdb_id
-                    }
-        
-        print(f"  No suitable match found on IMDB")
-        return None
+        return response.content[:1000]  # Return first 1000 chars for inspection
         
     except Exception as e:
-        print(f"  Error searching IMDB: {e}")
+        print(f"DEBUG: Error: {e}")
         return None
 
 def get_video_files(folder_path):
