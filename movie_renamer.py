@@ -10,38 +10,24 @@ import os
 import re
 import time
 import requests
+import argparse
 from bs4 import BeautifulSoup
 from urllib.parse import quote_plus
 import shutil
 
+# Parse command-line arguments
+parser = argparse.ArgumentParser(description='Movie Folder Renamer for Jellyfin')
+parser.add_argument('--input', type=str, help='Read movies from input file')
+parser.add_argument('--generate-inputfile-from', type=str, help='Scan directory and generate input file')
+parser.add_argument('--fileoutput', type=str, default='.', help='Directory to place generated input file (default: current directory)')
+parser.add_argument('--backlog-file', type=str, default='backlog.txt', help='File to write unmatched movies to (default: backlog.txt)')
+parser.add_argument('--execute', action='store_true', help='Actually rename files (disable dry-run)')
+args = parser.parse_args()
+
 # Configuration
 BASE_PATH = "/mnt/nfs/huddle/media/Filme"
-DRY_RUN = True  # Set to False to actually rename files
+DRY_RUN = not args.execute  # Set to False if --execute is used
 WAIT_TIME = 1  # Seconds between IMDB requests to be respectful
-
-# List of 20 movies starting from Body Snatchers
-MOVIES_TO_PROCESS = [
-    "Body Snatchers",
-    "Bodyguard", 
-    "Bread Crumbs",
-    "Breaking - Dawn - Biss zum Ende der Nacht - Teil 1",
-    "Brendan - und das Geheimnis von Kells",
-    "Buck Rogers (1979)",
-    "Bud, Der Ganovenschreck (1983)",
-    "Buddy fängt nur große Fische (1973)",
-    "Buddy Haut Den Lukas (1980)",
-    "Buddy in HongKong (1975)",
-    "Bunker-Es gibt kein Entkommen",
-    "Buried - Lebend begraben",
-    "Byzantium",
-    "Cabin Fever -The New Outbreak",
-    "Cabin Fever 2 - Spring Fever", 
-    "Cabin Fever-1",
-    "Cabin.Fever.3.Patient.Zero",
-    "Caged (2010)",
-    "Captivity",
-    "Carlos der Schakal"
-]
 
 def clean_search_term(folder_name):
     """Clean folder name for IMDB search"""
@@ -66,8 +52,12 @@ def clean_search_term(folder_name):
     
     return clean_name
 
-def search_imdb(movie_title):
-    """Search IMDB for movie and return first result with year and ID"""
+def has_year_in_folder_name(folder_name):
+    """Check if folder name contains a year in parentheses"""
+    return bool(re.search(r'\(\d{4}\)', folder_name))
+
+def search_imdb(movie_title, original_name):
+    """Search IMDB for movie and return result with year and ID, or None if ambiguous"""
     try:
         # Try multiple search strategies
         search_terms = [
@@ -75,6 +65,8 @@ def search_imdb(movie_title):
             movie_title.split(' - ')[0].strip(),  # First part before dash
             ' '.join(movie_title.split()[:3]),  # First 3 words
         ]
+        
+        all_results = []
         
         for search_term in search_terms:
             if not search_term.strip():
@@ -98,7 +90,7 @@ def search_imdb(movie_title):
             title_links = soup.find_all('a', href=re.compile(r'/title/tt\d+/'))
             print(f"DEBUG: Processing {len(title_links)} title links")
             
-            for i, link in enumerate(title_links[:3]):  # Check first 3 results
+            for i, link in enumerate(title_links[:5]):  # Check first 5 results
                 href = link.get('href', '')
                 print(f"DEBUG: Link {i}: {href}")
                 title_match = re.search(r'/title/(tt\d+)/', href)
@@ -165,12 +157,13 @@ def search_imdb(movie_title):
                                             break
                             
                             if year:
-                                print(f"  ✅ Found: {title_text} ({year}) [imdbid-{imdb_id}]")
-                                return {
+                                result = {
                                     'title': title_text,
                                     'year': year,
                                     'imdb_id': imdb_id
                                 }
+                                all_results.append(result)
+                                print(f"  ✅ Found candidate: {title_text} ({year}) [imdbid-{imdb_id}]")
                             else:
                                 print(f"DEBUG: No year found for {title_text}")
                         else:
@@ -182,7 +175,7 @@ def search_imdb(movie_title):
             # Fallback to old structure
             results = soup.find_all('td', class_='result_text')
             
-            for result in results:
+            for result in results[:5]:  # Check first 5
                 link = result.find('a')
                 if not link:
                     continue
@@ -200,20 +193,44 @@ def search_imdb(movie_title):
                         year = year_match.group(1)
                         title_clean = re.sub(r'\s*\(\d{4}\).*$', '', link.get_text()).strip()
                         
-                        print(f"  ✅ Found: {title_clean} ({year}) [imdbid-{imdb_id}]")
-                        return {
+                        result = {
                             'title': title_clean,
                             'year': year,
                             'imdb_id': imdb_id
                         }
+                        all_results.append(result)
+                        print(f"  ✅ Found candidate: {title_clean} ({year}) [imdbid-{imdb_id}]")
         
-        print(f"  ❌ No suitable match found on IMDB for any search term")
-        # Debug the search
-        debug_content = debug_imdb_search(search_terms[0])
-        if debug_content:
-            print("DEBUG: Response content preview:")
-            print(debug_content.decode('utf-8', errors='ignore')[:500])
-        return None
+        # Now decide what to return
+        if not all_results:
+            print(f"  ❌ No suitable matches found on IMDB for any search term")
+            return None
+        
+        # Check for ambiguity
+        years = set(r['year'] for r in all_results)
+        has_year_in_name = has_year_in_folder_name(original_name)
+        
+        if len(all_results) > 1 and len(years) > 1:
+            if has_year_in_name:
+                # Extract year from folder name
+                year_match = re.search(r'\((\d{4})\)', original_name)
+                if year_match:
+                    target_year = year_match.group(1)
+                    # Find matching result
+                    for result in all_results:
+                        if result['year'] == target_year:
+                            print(f"  Selected version matching folder year ({target_year}): {result['title']} ({result['year']})")
+                            return result
+                    print(f"  No IMDB result matches the year in folder name ({target_year}). Skipping.")
+                    return None
+            else:
+                print(f"  Multiple versions found with different years {sorted(years)}, but no year in folder name. Skipping to avoid ambiguity.")
+                return None
+        else:
+            # Single result or all same year - return first
+            result = all_results[0]
+            print(f"  Selected: {result['title']} ({result['year']}) [imdbid-{result['imdb_id']}]")
+            return result
         
     except Exception as e:
         print(f"  Error searching IMDB: {e}")
@@ -258,6 +275,19 @@ def debug_imdb_search(movie_title):
     except Exception as e:
         print(f"DEBUG: Error: {e}")
         return None
+
+def scan_directory_for_movies(base_dir):
+    """Scan directory for movie folders and return list of folder names"""
+    movies = []
+    try:
+        for item in sorted(os.listdir(base_dir)):
+            item_path = os.path.join(base_dir, item)
+            if os.path.isdir(item_path) and not item.startswith('.'):
+                # Exclude common non-movie files/folders if any
+                movies.append(item)
+    except OSError as e:
+        print(f"Error scanning directory {base_dir}: {e}")
+    return movies
 
 def get_video_files(folder_path):
     """Get video files from folder"""
@@ -308,7 +338,7 @@ def rename_movie_folder(folder_name):
     print(f"  Searching IMDB for: '{search_term}'")
     
     # Search IMDB
-    movie_info = search_imdb(search_term)
+    movie_info = search_imdb(search_term, folder_name)
     if not movie_info:
         print(f"  Skipping: Could not find match on IMDB")
         return False
@@ -356,15 +386,42 @@ def rename_movie_folder(folder_name):
 
 def main():
     """Main function"""
+    # Handle generate input file mode
+    if args.generate_inputfile_from:
+        print(f"Scanning directory: {args.generate_inputfile_from}")
+        movies = scan_directory_for_movies(args.generate_inputfile_from)
+        output_file = os.path.join(args.fileoutput, 'movielist.txt')
+        try:
+            with open(output_file, 'w') as f:
+                for movie in movies:
+                    f.write(movie + '\n')
+            print(f"Generated input file: {output_file} with {len(movies)} movie folders")
+        except Exception as e:
+            print(f"Error writing input file: {e}")
+        return
+    
+    # Require input file for processing
+    if not args.input:
+        parser.error("Either --input or --generate-inputfile-from must be specified")
+    
+    # Load movies from input file
+    try:
+        with open(args.input, 'r') as f:
+            movies_to_process = [line.strip() for line in f if line.strip()]
+        print(f"Loaded {len(movies_to_process)} movies from {args.input}")
+    except Exception as e:
+        print(f"Error reading input file {args.input}: {e}")
+        return
+    
     print("Movie Folder Renamer for Jellyfin")
     print("=" * 50)
     print(f"Base path: {BASE_PATH}")
     print(f"Dry run mode: {DRY_RUN}")
-    print(f"Processing {len(MOVIES_TO_PROCESS)} movies")
+    print(f"Processing {len(movies_to_process)} movies")
     
     if DRY_RUN:
         print("\n⚠️  DRY RUN MODE - No files will be actually renamed")
-        print("Set DRY_RUN = False in the script to perform actual renaming")
+        print("Use --execute to perform actual renaming")
     
     print("\nNaming convention:")
     print("  Folder: Movie_Name (year)")
@@ -374,17 +431,19 @@ def main():
     
     success_count = 0
     skipped_count = 0
+    skipped_movies = []
     
-    for i, movie_folder in enumerate(MOVIES_TO_PROCESS, 1):
-        print(f"\n[{i}/{len(MOVIES_TO_PROCESS)}]", end="")
+    for i, movie_folder in enumerate(movies_to_process, 1):
+        print(f"\n[{i}/{len(movies_to_process)}]", end="")
         
         if rename_movie_folder(movie_folder):
             success_count += 1
         else:
             skipped_count += 1
+            skipped_movies.append(movie_folder)
             
         # Be respectful to IMDB
-        if i < len(MOVIES_TO_PROCESS):
+        if i < len(movies_to_process):
             print(f"  Waiting {WAIT_TIME}s before next request...")
             time.sleep(WAIT_TIME)
     
@@ -393,11 +452,21 @@ def main():
     print("=" * 50)
     print(f"Successfully processed: {success_count}")
     print(f"Skipped: {skipped_count}")
-    print(f"Total: {len(MOVIES_TO_PROCESS)}")
+    print(f"Total: {len(movies_to_process)}")
+    
+    # Write backlog file
+    if skipped_movies:
+        try:
+            with open(args.backlog_file, 'w') as f:
+                for movie in skipped_movies:
+                    f.write(movie + '\n')
+            print(f"\nBacklog written to: {args.backlog_file} ({len(skipped_movies)} entries)")
+        except Exception as e:
+            print(f"Error writing backlog file: {e}")
     
     if DRY_RUN:
         print(f"\n⚠️  This was a DRY RUN - no files were actually renamed")
-        print("Review the output above, then set DRY_RUN = False to perform actual renaming")
+        print("Use --execute to perform actual renaming")
 
 if __name__ == "__main__":
     main()
