@@ -13,6 +13,7 @@ import requests
 import argparse
 import json
 import subprocess
+import difflib
 from bs4 import BeautifulSoup
 from urllib.parse import quote_plus
 import shutil
@@ -71,6 +72,20 @@ def derive_related_output_path(base_file, suffix):
     base_root, base_ext = os.path.splitext(base_file)
     extension = base_ext or '.txt'
     return f"{base_root}{suffix}{extension}"
+
+def read_metadata_text(file_path):
+    """Read metadata text using a few common encodings."""
+    for encoding in ('utf-8', 'iso-8859-1', 'cp1252'):
+        try:
+            with open(file_path, 'r', encoding=encoding, errors='strict') as handle:
+                return handle.read(20000)
+        except (OSError, UnicodeDecodeError):
+            continue
+    try:
+        with open(file_path, 'r', encoding='utf-8', errors='ignore') as handle:
+            return handle.read(20000)
+    except OSError:
+        return ''
 
 def is_real_video_file(file_path):
     """Check whether a file is actually a video file, not just named like one."""
@@ -148,14 +163,9 @@ def collect_local_year_clues(folder_path, debug=False):
                     clue_years.append(year)
 
                 if ext in TEXT_METADATA_EXTENSIONS:
-                    try:
-                        # Small metadata files are enough for disambiguation hints.
-                        with open(file_path, 'r', encoding='utf-8', errors='ignore') as handle:
-                            text = handle.read(20000)
-                        for year in extract_year_candidates(text):
-                            clue_years.append(year)
-                    except OSError:
-                        continue
+                    text = read_metadata_text(file_path)
+                    for year in extract_year_candidates(text):
+                        clue_years.append(year)
     except OSError:
         return []
 
@@ -211,10 +221,8 @@ def collect_metadata_title_clues(folder_path, debug=False):
                     continue
 
                 file_path = os.path.join(root, file_name)
-                try:
-                    with open(file_path, 'r', encoding='utf-8', errors='ignore') as handle:
-                        text = handle.read(20000)
-                except OSError:
+                text = read_metadata_text(file_path)
+                if not text:
                     continue
 
                 for pattern in title_patterns:
@@ -244,6 +252,38 @@ def collect_metadata_title_clues(folder_path, debug=False):
         print(f"  Found metadata title clues: {', '.join(unique_titles[:5])}")
     return unique_titles[:5]
 
+def collect_imdb_id_clues(folder_path, debug=False):
+    """Collect direct IMDb IDs from local metadata files."""
+    imdb_ids = []
+
+    try:
+        for root, dirs, files in os.walk(folder_path):
+            dirs[:] = [d for d in dirs if not d.startswith('.') and not d.startswith('@')]
+
+            for file_name in files:
+                _, ext = os.path.splitext(file_name)
+                if ext.lower() not in TEXT_METADATA_EXTENSIONS:
+                    continue
+
+                file_path = os.path.join(root, file_name)
+                text = read_metadata_text(file_path)
+                if not text:
+                    continue
+
+                imdb_ids.extend(re.findall(r'\b(tt\d{7,9})\b', text, flags=re.IGNORECASE))
+    except OSError:
+        return []
+
+    unique_ids = []
+    for imdb_id in imdb_ids:
+        normalized = imdb_id.lower()
+        if normalized not in unique_ids:
+            unique_ids.append(normalized)
+
+    if debug and unique_ids:
+        print(f"  Found metadata IMDb IDs: {', '.join(unique_ids)}")
+    return unique_ids
+
 def collect_local_search_clues(folder_path, original_folder_name, debug=False):
     """Collect extra search phrases from filenames and relevant metadata lines."""
     clue_terms = []
@@ -263,20 +303,17 @@ def collect_local_search_clues(folder_path, original_folder_name, debug=False):
                     clue_terms.append(cleaned_stem)
 
                 if ext in TEXT_METADATA_EXTENSIONS:
-                    try:
-                        with open(file_path, 'r', encoding='utf-8', errors='ignore') as handle:
-                            for line in handle.read(20000).splitlines():
-                                cleaned_line = clean_search_term(line)
-                                if not cleaned_line:
-                                    continue
-                                line_words = set(normalize_title_for_match(cleaned_line))
-                                if not line_words or not target_words:
-                                    continue
-                                overlap = target_words & line_words
-                                if len(overlap) >= max(1, min(2, len(target_words))):
-                                    clue_terms.append(cleaned_line)
-                    except OSError:
-                        continue
+                    text = read_metadata_text(file_path)
+                    for line in text.splitlines():
+                        cleaned_line = clean_search_term(line)
+                        if not cleaned_line:
+                            continue
+                        line_words = set(normalize_title_for_match(cleaned_line))
+                        if not line_words or not target_words:
+                            continue
+                        overlap = target_words & line_words
+                        if len(overlap) >= max(1, min(2, len(target_words))):
+                            clue_terms.append(cleaned_line)
     except OSError:
         return []
 
@@ -327,14 +364,21 @@ def title_match_score(search_title, candidate_title):
         # One-word titles are too ambiguous to match by substring alone.
         return 300 if candidate_words == search_words else 0
 
+    if len(search_words) <= 2:
+        if candidate_words == search_words:
+            return 250
+        if len(candidate_words) == len(search_words):
+            search_list = sorted(search_words)
+            candidate_list = sorted(candidate_words)
+            if all(difflib.SequenceMatcher(None, s, c).ratio() >= 0.85 for s, c in zip(search_list, candidate_list)):
+                return 180
+        return 0
+
     overlap = search_words & candidate_words
     if search_words.issubset(candidate_words):
         extra_words = candidate_words - search_words
         exact_bonus = 50 if candidate_words == search_words else 0
         return 200 + exact_bonus - (len(extra_words) * 15)
-
-    if len(search_words) <= 2:
-        return 120 if overlap == search_words and candidate_words == search_words else 0
 
     minimum_overlap = len(search_words) - 1
     if len(overlap) >= minimum_overlap:
@@ -461,6 +505,42 @@ def fetch_imdb_movie_details(imdb_id, debug=False):
         'imdb_id': imdb_id
     }
 
+def extract_search_result_candidate(link, imdb_id):
+    """Build a candidate directly from the IMDb search-result HTML."""
+    title_text = link.get_text(" ", strip=True)
+    if not title_text:
+        heading = link.find('h3')
+        title_text = heading.get_text(" ", strip=True) if heading else ''
+    if not title_text:
+        aria_label = link.get('aria-label', '')
+        match = re.search(r'for\s+(.+)$', aria_label)
+        title_text = match.group(1).strip() if match else ''
+    if not title_text:
+        return None
+
+    year = None
+    ancestor = link
+    for _ in range(6):
+        ancestor = ancestor.parent
+        if not ancestor:
+            break
+        year_match = re.search(r'\b((?:19|20)\d{2})\b', ancestor.get_text(" ", strip=True))
+        if year_match:
+            year = year_match.group(1)
+            break
+
+    if not year:
+        return None
+
+    title_text = re.sub(r'\s*\((?:19|20)\d{2}\)\s*$', '', title_text).strip()
+    return {
+        'title': title_text,
+        'title_de': title_text,
+        'title_en': title_text,
+        'year': year,
+        'imdb_id': imdb_id
+    }
+
 def search_imdb(
     original_folder_name,
     folder_name_for_year,
@@ -545,6 +625,8 @@ def search_imdb(
                         seen_ids.add(imdb_id)
                         details = fetch_imdb_movie_details(imdb_id, debug=debug)
                         if not details:
+                            details = extract_search_result_candidate(link, imdb_id)
+                        if not details:
                             continue
                         title_score = candidate_match_score(details, title_candidates, base_title=search_base)
                         if title_score <= 0:
@@ -595,6 +677,8 @@ def search_imdb(
                             continue
                         seen_ids.add(imdb_id)
                         details = fetch_imdb_movie_details(imdb_id, debug=debug)
+                        if not details:
+                            details = extract_search_result_candidate(link, imdb_id)
                         if not details:
                             continue
                         title_score = candidate_match_score(details, title_candidates, base_title=search_base)
@@ -851,20 +935,27 @@ def rename_movie_folder(folder_name, debug=False):
     clue_years = []
     clue_terms = []
     metadata_titles = []
+    metadata_imdb_ids = []
     if not has_year_in_folder_name(folder_name):
         clue_years = collect_local_year_clues(folder_path, debug=debug)
         metadata_titles = collect_metadata_title_clues(folder_path, debug=debug)
         clue_terms = collect_local_search_clues(folder_path, folder_name, debug=debug)
+        metadata_imdb_ids = collect_imdb_id_clues(folder_path, debug=debug)
     
     # Search IMDB
-    movie_info = search_imdb(
-        folder_name,
-        folder_name,
-        clue_years=clue_years,
-        clue_terms=clue_terms,
-        authoritative_titles=metadata_titles,
-        debug=debug
-    )
+    if len(metadata_imdb_ids) == 1:
+        if debug:
+            print(f"  Using IMDb ID from metadata: {metadata_imdb_ids[0]}")
+        movie_info = fetch_imdb_movie_details(metadata_imdb_ids[0], debug=debug)
+    else:
+        movie_info = search_imdb(
+            folder_name,
+            folder_name,
+            clue_years=clue_years,
+            clue_terms=clue_terms,
+            authoritative_titles=metadata_titles,
+            debug=debug
+        )
     if not movie_info:
         if debug:
             print(f"  Skipping: Could not find match on IMDB")
