@@ -16,6 +16,10 @@ from bs4 import BeautifulSoup
 from urllib.parse import quote_plus
 import shutil
 
+HOME_DIR = os.path.expanduser("~")
+DEFAULT_BACKLOG_FILE = os.path.join(HOME_DIR, "backlog.txt")
+DEFAULT_SUCCESS_FILE = os.path.join(HOME_DIR, "success.txt")
+
 def transliterate_german(text):
     """Transliterate German umlauts and ß to ASCII equivalents"""
     transliterations = {
@@ -36,7 +40,18 @@ parser = argparse.ArgumentParser(description='Movie Folder Renamer for Jellyfin'
 parser.add_argument('--input', type=str, help='Read movies from input file')
 parser.add_argument('--generate-inputfile-from', type=str, help='Scan directory and generate input file')
 parser.add_argument('--fileoutput', type=str, default='.', help='Directory to place generated input file (default: current directory)')
-parser.add_argument('--backlog-file', type=str, default='backlog.txt', help='File to write unmatched movies to (default: backlog.txt)')
+parser.add_argument(
+    '--backlog-file',
+    type=str,
+    default=DEFAULT_BACKLOG_FILE,
+    help='File to write movies without video files to (default: ~/backlog.txt)'
+)
+parser.add_argument(
+    '--success-file',
+    type=str,
+    default=DEFAULT_SUCCESS_FILE,
+    help='File to write successfully processed movies to (default: ~/success.txt)'
+)
 parser.add_argument('--execute', action='store_true', help='Actually rename files (disable dry-run)')
 parser.add_argument('--debug', action='store_true', help='Enable verbose IMDB search debugging')
 args = parser.parse_args()
@@ -48,6 +63,12 @@ WAIT_TIME = 1  # Seconds between IMDB requests to be respectful
 VIDEO_EXTENSIONS = {
     '.mkv', '.mp4', '.avi', '.mov', '.wmv', '.flv', '.webm', '.m4v', '.m2ts', '.mts', '.ts'
 }
+
+def derive_related_output_path(base_file, suffix):
+    """Create sibling output file path based on the configured base file."""
+    base_root, base_ext = os.path.splitext(base_file)
+    extension = base_ext or '.txt'
+    return f"{base_root}{suffix}{extension}"
 
 def clean_search_term(folder_name):
     """Clean folder name for IMDB search"""
@@ -562,6 +583,7 @@ def main():
     success_count = 0
     skipped_count = 0
     backlog_count = 0
+    success_movies = []
     skipped_movies = []
     backlog_movies = []
     
@@ -576,6 +598,7 @@ def main():
         else:
             success_count += 1
             folder_renamed, has_videos = result
+            success_movies.append(movie_folder)
             if not has_videos:
                 backlog_count += 1
                 backlog_movies.append(movie_folder)
@@ -592,6 +615,16 @@ def main():
     print(f"Skipped (no IMDB match): {skipped_count}")
     print(f"Added to backlog (no videos): {backlog_count}")
     print(f"Total: {len(movies_to_process)}")
+
+    # Write success file for successfully processed movies
+    if success_movies:
+        try:
+            with open(args.success_file, 'w') as f:
+                for movie in success_movies:
+                    f.write(movie + '\n')
+            print(f"Success list written to: {args.success_file} ({len(success_movies)} entries)")
+        except Exception as e:
+            print(f"Error writing success file: {e}")
     
     # Write backlog file for movies without video files
     if backlog_movies:
@@ -606,7 +639,7 @@ def main():
     # Write skipped file for IMDB lookup failures
     if skipped_movies:
         try:
-            skipped_file = args.backlog_file.replace('.txt', '_skipped.txt')
+            skipped_file = derive_related_output_path(args.backlog_file, '_skipped')
             with open(skipped_file, 'w') as f:
                 for movie in skipped_movies:
                     f.write(movie + '\n')
