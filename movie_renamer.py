@@ -12,6 +12,7 @@ import time
 import requests
 import argparse
 import json
+import subprocess
 from bs4 import BeautifulSoup
 from urllib.parse import quote_plus
 import shutil
@@ -70,6 +71,25 @@ def derive_related_output_path(base_file, suffix):
     base_root, base_ext = os.path.splitext(base_file)
     extension = base_ext or '.txt'
     return f"{base_root}{suffix}{extension}"
+
+def is_real_video_file(file_path):
+    """Check whether a file is actually a video file, not just named like one."""
+    _, ext = os.path.splitext(file_path)
+    if ext.lower() not in VIDEO_EXTENSIONS:
+        return False
+
+    try:
+        result = subprocess.run(
+            ['file', '--brief', '--mime-type', file_path],
+            capture_output=True,
+            text=True,
+            check=False
+        )
+    except OSError:
+        return True
+
+    mime_type = result.stdout.strip().lower()
+    return mime_type.startswith('video/')
 
 def extract_year_candidates(text):
     """Extract plausible movie years from free text."""
@@ -612,9 +632,8 @@ def get_video_files(folder_path):
             # Skip hidden/system subfolders (e.g. Synology .@__thumb, @eaDir).
             dirs[:] = [d for d in dirs if not d.startswith('.') and not d.startswith('@')]
             for file in files:
-                _, ext = os.path.splitext(file)
-                if ext.lower() in VIDEO_EXTENSIONS:
-                    # Get relative path from folder_path
+                file_path = os.path.join(root, file)
+                if is_real_video_file(file_path):
                     rel_path = os.path.relpath(root, folder_path)
                     if rel_path == '.':
                         rel_path = ''
@@ -709,6 +728,13 @@ def rename_movie_folder(folder_name, debug=False):
             print(f"    {rel_path}/{filename}")
         else:
             print(f"    {filename}")
+
+    result_info = {
+        'original_folder': folder_name,
+        'new_folder': new_folder_name,
+        'has_videos': len(video_files) > 0,
+        'video_moves': []
+    }
     
     # Always rename folder if we have movie info
     if DRY_RUN:
@@ -722,6 +748,8 @@ def rename_movie_folder(folder_name, debug=False):
             base_name = create_video_base_name(new_folder_name, movie_info)
             cd_suffix = f"-cd{idx + 1}" if len(all_video_files) > 1 else ""
             new_video_name = f"{base_name}{cd_suffix}{ext.lower()}"
+            source_display = f"{rel_path}/{filename}" if rel_path else filename
+            result_info['video_moves'].append((source_display, new_video_name))
             if rel_path:
                 print(f"    Move and rename: {rel_path}/{filename} -> {new_video_name}")
             else:
@@ -764,8 +792,12 @@ def rename_movie_folder(folder_name, debug=False):
                 
                 if os.path.exists(old_video_path):
                     if os.path.abspath(old_video_path) == os.path.abspath(new_video_path):
+                        source_display = f"{rel_path}/{filename}" if rel_path else filename
+                        result_info['video_moves'].append((source_display, new_video_name))
                         continue
                     shutil.move(old_video_path, new_video_path)
+                    source_display = f"{rel_path}/{filename}" if rel_path else filename
+                    result_info['video_moves'].append((source_display, new_video_name))
                     print(f"    Renamed video: {filename} -> {new_video_name}")
             
             # Remove empty subfolders
@@ -783,7 +815,7 @@ def rename_movie_folder(folder_name, debug=False):
     
     # Return True if we renamed the folder, regardless of video files
     # But we'll handle backlog logic in main()
-    return True, len(video_files) > 0
+    return result_info
 
 def main():
     """Main function"""
@@ -847,9 +879,8 @@ def main():
             skipped_movies.append(movie_folder)
         else:
             success_count += 1
-            folder_renamed, has_videos = result
-            success_movies.append(movie_folder)
-            if not has_videos:
+            success_movies.append(result)
+            if not result['has_videos']:
                 backlog_count += 1
                 backlog_movies.append(movie_folder)
             
@@ -870,8 +901,14 @@ def main():
     if success_movies:
         try:
             with open(args.success_file, 'w') as f:
-                for movie in success_movies:
-                    f.write(movie + '\n')
+                for item in success_movies:
+                    f.write(f"Folder: {item['original_folder']} -> {item['new_folder']}\n")
+                    if item['video_moves']:
+                        for old_name, new_name in item['video_moves']:
+                            f.write(f"Video: {old_name} -> {new_name}\n")
+                    else:
+                        f.write("Video: none found\n")
+                    f.write("\n")
             print(f"Success list written to: {args.success_file} ({len(success_movies)} entries)")
         except Exception as e:
             print(f"Error writing success file: {e}")
