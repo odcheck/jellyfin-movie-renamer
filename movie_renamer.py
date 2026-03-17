@@ -63,12 +63,19 @@ WAIT_TIME = 1  # Seconds between IMDB requests to be respectful
 VIDEO_EXTENSIONS = {
     '.mkv', '.mp4', '.avi', '.mov', '.wmv', '.flv', '.webm', '.m4v', '.m2ts', '.mts', '.ts'
 }
+TEXT_METADATA_EXTENSIONS = {'.nfo', '.txt', '.xml'}
 
 def derive_related_output_path(base_file, suffix):
     """Create sibling output file path based on the configured base file."""
     base_root, base_ext = os.path.splitext(base_file)
     extension = base_ext or '.txt'
     return f"{base_root}{suffix}{extension}"
+
+def extract_year_candidates(text):
+    """Extract plausible movie years from free text."""
+    if not text:
+        return []
+    return re.findall(r'\b((?:19|20)\d{2})\b', text)
 
 def clean_search_term(folder_name):
     """Clean folder name for IMDB search"""
@@ -101,6 +108,84 @@ def extract_year_from_folder_name(folder_name):
     year_match = re.search(r'\((\d{4})\)', folder_name)
     return year_match.group(1) if year_match else None
 
+def collect_local_year_clues(folder_path, debug=False):
+    """Collect year hints from filenames and small metadata files inside a movie folder."""
+    clue_years = []
+
+    try:
+        for root, dirs, files in os.walk(folder_path):
+            dirs[:] = [d for d in dirs if not d.startswith('.') and not d.startswith('@')]
+
+            for file_name in files:
+                file_path = os.path.join(root, file_name)
+                _, ext = os.path.splitext(file_name)
+                ext = ext.lower()
+
+                for year in extract_year_candidates(file_name):
+                    clue_years.append(year)
+
+                if ext in TEXT_METADATA_EXTENSIONS:
+                    try:
+                        # Small metadata files are enough for disambiguation hints.
+                        with open(file_path, 'r', encoding='utf-8', errors='ignore') as handle:
+                            text = handle.read(20000)
+                        for year in extract_year_candidates(text):
+                            clue_years.append(year)
+                    except OSError:
+                        continue
+    except OSError:
+        return []
+
+    unique_years = sorted(set(clue_years))
+    if debug and unique_years:
+        print(f"  Found local year clues: {', '.join(unique_years)}")
+    return unique_years
+
+def collect_local_search_clues(folder_path, original_folder_name, debug=False):
+    """Collect extra search phrases from filenames and relevant metadata lines."""
+    clue_terms = []
+    target_words = set(normalize_title_for_match(original_folder_name))
+
+    try:
+        for root, dirs, files in os.walk(folder_path):
+            dirs[:] = [d for d in dirs if not d.startswith('.') and not d.startswith('@')]
+
+            for file_name in files:
+                file_path = os.path.join(root, file_name)
+                file_stem, ext = os.path.splitext(file_name)
+                ext = ext.lower()
+
+                cleaned_stem = clean_search_term(file_stem)
+                if cleaned_stem:
+                    clue_terms.append(cleaned_stem)
+
+                if ext in TEXT_METADATA_EXTENSIONS:
+                    try:
+                        with open(file_path, 'r', encoding='utf-8', errors='ignore') as handle:
+                            for line in handle.read(20000).splitlines():
+                                cleaned_line = clean_search_term(line)
+                                if not cleaned_line:
+                                    continue
+                                line_words = set(normalize_title_for_match(cleaned_line))
+                                if not line_words or not target_words:
+                                    continue
+                                overlap = target_words & line_words
+                                if len(overlap) >= max(1, min(2, len(target_words))):
+                                    clue_terms.append(cleaned_line)
+                    except OSError:
+                        continue
+    except OSError:
+        return []
+
+    unique_terms = []
+    for term in clue_terms:
+        if term and term not in unique_terms:
+            unique_terms.append(term)
+
+    if debug and unique_terms:
+        print(f"  Found local search clues: {', '.join(unique_terms[:5])}")
+    return unique_terms[:5]
+
 def sanitize_title_for_fs(title):
     """Normalize title to filesystem-safe Jellyfin style title token."""
     title = transliterate_german(title or '')
@@ -109,6 +194,37 @@ def sanitize_title_for_fs(title):
     title = re.sub(r'[^A-Za-z0-9 ]+', ' ', title)
     title = re.sub(r'\s+', ' ', title).strip()
     return title.replace(' ', '_')
+
+def normalize_title_for_match(title):
+    """Normalize a title for fuzzy title comparison."""
+    title = transliterate_german((title or '').lower())
+    title = re.sub(r'[\(\)\[\]\{\}]', ' ', title)
+    title = re.sub(r'[^a-z0-9 ]+', ' ', title)
+    words = [word for word in title.split() if word]
+    stop_words = {
+        'a', 'an', 'and', 'das', 'dem', 'den', 'der', 'des', 'die', 'ein', 'eine', 'einer',
+        'eines', 'im', 'in', 'of', 'the', 'und', 'von', 'zu', 'zum', 'zur'
+    }
+    filtered_words = [word for word in words if word not in stop_words]
+    return filtered_words or words
+
+def titles_match(search_title, candidate_title):
+    """Check whether an IMDB candidate title is a close enough title match."""
+    search_words = set(normalize_title_for_match(search_title))
+    candidate_words = set(normalize_title_for_match(candidate_title))
+
+    if not search_words or not candidate_words:
+        return False
+
+    if search_words.issubset(candidate_words):
+        return True
+
+    overlap = search_words & candidate_words
+    if len(search_words) <= 2:
+        return overlap == search_words
+
+    minimum_overlap = len(search_words) - 1
+    return len(overlap) >= minimum_overlap
 
 def extract_imdb_title(soup):
     """Extract display title from IMDB movie page."""
@@ -202,7 +318,7 @@ def fetch_imdb_movie_details(imdb_id, debug=False):
         'imdb_id': imdb_id
     }
 
-def search_imdb(original_folder_name, folder_name_for_year, debug=False):
+def search_imdb(original_folder_name, folder_name_for_year, clue_years=None, clue_terms=None, debug=False):
     """Search IMDB for movie and return result with year and ID, or None if ambiguous"""
     try:
         search_base = clean_search_term(original_folder_name)
@@ -212,18 +328,40 @@ def search_imdb(original_folder_name, folder_name_for_year, debug=False):
             search_base.split(' - ')[0].strip(),
             ' '.join(search_base.split()[:3]),
         ]
+        if clue_years:
+            for clue_year in clue_years:
+                search_terms.append(f"{search_base} {clue_year}")
+        if clue_terms:
+            search_terms.extend(clue_terms)
+
+        # Preserve order while dropping empty/duplicate search terms.
+        search_terms = list(dict.fromkeys(term.strip() for term in search_terms if term.strip()))
 
         all_results = []
         seen_ids = set()
+        results_by_id = {}
+        candidate_scores = {}
 
-        for search_term in search_terms:
+        for search_index, search_term in enumerate(search_terms):
             if not search_term.strip():
                 continue
 
             if debug:
                 print(f"  Trying search: '{search_term}'")
 
-            search_url = f"https://www.imdb.com/find?q={quote_plus(search_term)}&s=tt&ttype=ft"
+            is_clue_term = bool(clue_terms and search_term in clue_terms)
+            is_year_hint_term = bool(clue_years and any(year in search_term for year in clue_years))
+            term_weight = 1
+            if search_index == 0:
+                term_weight += 3
+            elif search_index == 1:
+                term_weight += 2
+            if is_year_hint_term:
+                term_weight += 1
+            if is_clue_term:
+                term_weight += 3
+
+            search_url = f"https://www.imdb.com/find?q={quote_plus(search_term)}&s=tt"
             headers = {
                 'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'
             }
@@ -242,13 +380,38 @@ def search_imdb(original_folder_name, folder_name_for_year, debug=False):
                 title_match = re.search(r'/title/(tt\d+)/', href)
                 if title_match:
                     imdb_id = title_match.group(1)
-                    if imdb_id in seen_ids:
-                        continue
-                    seen_ids.add(imdb_id)
-                    details = fetch_imdb_movie_details(imdb_id, debug=debug)
-                    if not details:
-                        continue
-                    all_results.append(details)
+                    if imdb_id in results_by_id:
+                        details = results_by_id[imdb_id]
+                    else:
+                        if imdb_id in seen_ids:
+                            continue
+                        seen_ids.add(imdb_id)
+                        details = fetch_imdb_movie_details(imdb_id, debug=debug)
+                        if not details:
+                            continue
+                        if not titles_match(search_base, details['title']) and not titles_match(search_base, details.get('title_en')):
+                            if debug:
+                                print(f"  Ignoring loosely related result: {details['title']} ({details['year']})")
+                            continue
+                        results_by_id[imdb_id] = details
+                    score = candidate_scores.setdefault(imdb_id, {
+                        'score': 0,
+                        'hits': 0,
+                        'clue_hits': 0,
+                        'year_distance': None
+                    })
+                    score['score'] += term_weight
+                    score['hits'] += 1
+                    if is_clue_term:
+                        score['clue_hits'] += 1
+                    if clue_years:
+                        distances = [abs(int(details['year']) - int(year)) for year in clue_years]
+                        if distances:
+                            best_distance = min(distances)
+                            if score['year_distance'] is None or best_distance < score['year_distance']:
+                                score['year_distance'] = best_distance
+                    if imdb_id not in [result['imdb_id'] for result in all_results]:
+                        all_results.append(details)
                     if debug:
                         print(
                             f"  ✅ Found candidate: {details['title']} ({details['year']}) "
@@ -264,25 +427,54 @@ def search_imdb(original_folder_name, folder_name_for_year, debug=False):
                 title_match = re.search(r'/title/(tt\d+)/', href)
                 if title_match:
                     imdb_id = title_match.group(1)
-                    if imdb_id in seen_ids:
-                        continue
-                    seen_ids.add(imdb_id)
-                    details = fetch_imdb_movie_details(imdb_id, debug=debug)
-                    if not details:
-                        continue
-                    all_results.append(details)
+                    if imdb_id in results_by_id:
+                        details = results_by_id[imdb_id]
+                    else:
+                        if imdb_id in seen_ids:
+                            continue
+                        seen_ids.add(imdb_id)
+                        details = fetch_imdb_movie_details(imdb_id, debug=debug)
+                        if not details:
+                            continue
+                        if not titles_match(search_base, details['title']) and not titles_match(search_base, details.get('title_en')):
+                            continue
+                        results_by_id[imdb_id] = details
+                    score = candidate_scores.setdefault(imdb_id, {
+                        'score': 0,
+                        'hits': 0,
+                        'clue_hits': 0,
+                        'year_distance': None
+                    })
+                    score['score'] += term_weight
+                    score['hits'] += 1
+                    if is_clue_term:
+                        score['clue_hits'] += 1
+                    if clue_years:
+                        distances = [abs(int(details['year']) - int(year)) for year in clue_years]
+                        if distances:
+                            best_distance = min(distances)
+                            if score['year_distance'] is None or best_distance < score['year_distance']:
+                                score['year_distance'] = best_distance
+                    if imdb_id not in [result['imdb_id'] for result in all_results]:
+                        all_results.append(details)
 
-        if not all_results:
+        unique_results = all_results
+
+        if not unique_results:
             if debug:
                 print(f"  ❌ No suitable matches found on IMDB for any search term")
             return None
 
-        years = set(r['year'] for r in all_results)
+        years = set(r['year'] for r in unique_results)
         target_year = extract_year_from_folder_name(folder_name_for_year)
+        clue_year_matches = []
+        if clue_years and not target_year:
+            clue_year_set = set(clue_years)
+            clue_year_matches = [result for result in unique_results if result['year'] in clue_year_set]
 
         if len(all_results) > 1 and len(years) > 1:
             if target_year:
-                for result in all_results:
+                for result in unique_results:
                     if result['year'] == target_year:
                         if debug:
                             print(
@@ -295,6 +487,52 @@ def search_imdb(original_folder_name, folder_name_for_year, debug=False):
                         f"  No IMDB result matches the year in folder name ({target_year}). Skipping."
                     )
                 return None
+
+            ranked_results = sorted(
+                unique_results,
+                key=lambda result: (
+                    candidate_scores.get(result['imdb_id'], {}).get('clue_hits', 0),
+                    candidate_scores.get(result['imdb_id'], {}).get('score', 0),
+                    candidate_scores.get(result['imdb_id'], {}).get('hits', 0),
+                    -(
+                        candidate_scores.get(result['imdb_id'], {}).get('year_distance', 999)
+                        if candidate_scores.get(result['imdb_id'], {}).get('year_distance', None) is not None
+                        else 999
+                    )
+                ),
+                reverse=True
+            )
+            best_result = ranked_results[0]
+            best_metrics = candidate_scores.get(best_result['imdb_id'], {})
+            tied_results = [
+                result for result in ranked_results
+                if (
+                    candidate_scores.get(result['imdb_id'], {}).get('clue_hits', 0),
+                    candidate_scores.get(result['imdb_id'], {}).get('score', 0),
+                    candidate_scores.get(result['imdb_id'], {}).get('hits', 0),
+                    (
+                        candidate_scores.get(result['imdb_id'], {}).get('year_distance', 999)
+                        if candidate_scores.get(result['imdb_id'], {}).get('year_distance', None) is not None
+                        else 999
+                    )
+                ) == (
+                    best_metrics.get('clue_hits', 0),
+                    best_metrics.get('score', 0),
+                    best_metrics.get('hits', 0),
+                    best_metrics.get('year_distance', 999)
+                    if best_metrics.get('year_distance', None) is not None
+                    else 999
+                )
+            ]
+            if len(tied_results) == 1 and (
+                best_metrics.get('clue_hits', 0) > 0 or best_metrics.get('hits', 0) > 1
+            ):
+                if debug:
+                    print(
+                        f"  Selected highest-confidence IMDB result: "
+                        f"{best_result['title']} ({best_result['year']})"
+                    )
+                return best_result
             if debug:
                 print(
                     f"  Multiple versions found with different years {sorted(years)}, "
@@ -302,7 +540,7 @@ def search_imdb(original_folder_name, folder_name_for_year, debug=False):
                 )
             return None
 
-        result = all_results[0]
+        result = unique_results[0]
         if debug:
             print(f"  Selected: {result['title']} ({result['year']}) [imdbid-{result['imdb_id']}]")
         return result
@@ -315,7 +553,7 @@ def search_imdb(original_folder_name, folder_name_for_year, debug=False):
 def debug_imdb_search(movie_title):
     """Debug IMDB search to see what we get"""
     try:
-        search_url = f"https://www.imdb.com/find?q={quote_plus(movie_title)}&s=tt&ttype=ft"
+        search_url = f"https://www.imdb.com/find?q={quote_plus(movie_title)}&s=tt"
         print(f"DEBUG: Searching URL: {search_url}")
         
         headers = {
@@ -437,9 +675,21 @@ def rename_movie_folder(folder_name, debug=False):
     # Use original folder name for IMDB search
     if debug:
         print(f"  Searching IMDB for: '{folder_name}'")
+
+    clue_years = []
+    clue_terms = []
+    if not has_year_in_folder_name(folder_name):
+        clue_years = collect_local_year_clues(folder_path, debug=debug)
+        clue_terms = collect_local_search_clues(folder_path, folder_name, debug=debug)
     
     # Search IMDB
-    movie_info = search_imdb(folder_name, folder_name, debug=debug)
+    movie_info = search_imdb(
+        folder_name,
+        folder_name,
+        clue_years=clue_years,
+        clue_terms=clue_terms,
+        debug=debug
+    )
     if not movie_info:
         if debug:
             print(f"  Skipping: Could not find match on IMDB")
