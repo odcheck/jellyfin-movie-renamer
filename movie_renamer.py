@@ -947,7 +947,12 @@ def rename_movie_folder(folder_name, debug=False):
         if debug:
             print(f"  Using IMDb ID from metadata: {metadata_imdb_ids[0]}")
         movie_info = fetch_imdb_movie_details(metadata_imdb_ids[0], debug=debug)
+        if not movie_info and debug:
+            print("  Direct IMDb ID fetch failed, falling back to title-based search with metadata clues")
     else:
+        movie_info = None
+
+    if not movie_info:
         movie_info = search_imdb(
             folder_name,
             folder_name,
