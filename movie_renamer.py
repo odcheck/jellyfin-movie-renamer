@@ -313,34 +313,61 @@ def normalize_title_for_match(title):
 
 def titles_match(search_title, candidate_title):
     """Check whether an IMDB candidate title is a close enough title match."""
+    return title_match_score(search_title, candidate_title) > 0
+
+def title_match_score(search_title, candidate_title):
+    """Return a quality score for how well a candidate title matches the search title."""
     search_words = set(normalize_title_for_match(search_title))
     candidate_words = set(normalize_title_for_match(candidate_title))
 
     if not search_words or not candidate_words:
-        return False
+        return 0
 
     if len(search_words) == 1:
         # One-word titles are too ambiguous to match by substring alone.
-        return candidate_words == search_words
-
-    if search_words.issubset(candidate_words):
-        return True
+        return 300 if candidate_words == search_words else 0
 
     overlap = search_words & candidate_words
+    if search_words.issubset(candidate_words):
+        extra_words = candidate_words - search_words
+        exact_bonus = 50 if candidate_words == search_words else 0
+        return 200 + exact_bonus - (len(extra_words) * 15)
+
     if len(search_words) <= 2:
-        return overlap == search_words
+        return 120 if overlap == search_words and candidate_words == search_words else 0
 
     minimum_overlap = len(search_words) - 1
-    return len(overlap) >= minimum_overlap
+    if len(overlap) >= minimum_overlap:
+        extra_words = candidate_words - search_words
+        return 100 + (len(overlap) * 10) - (len(extra_words) * 20)
+    return 0
 
-def candidate_matches_titles(details, title_candidates):
-    """Check whether IMDB result matches at least one trusted local title."""
+def candidate_matches_titles(details, title_candidates, base_title=None):
+    """Check whether IMDB result matches trusted local titles without ignoring the folder title."""
+    return candidate_match_score(details, title_candidates, base_title=base_title) > 0
+
+def candidate_match_score(details, title_candidates, base_title=None):
+    """Return the best title-match score, requiring compatibility with the base folder title."""
     candidate_title_de = details.get('title')
     candidate_title_en = details.get('title_en')
+    if base_title:
+        base_score = max(
+            title_match_score(base_title, candidate_title_de),
+            title_match_score(base_title, candidate_title_en)
+        )
+        if base_score <= 0:
+            return 0
+    else:
+        base_score = 0
+
+    best_score = 0
     for title in title_candidates:
-        if titles_match(title, candidate_title_de) or titles_match(title, candidate_title_en):
-            return True
-    return False
+        best_score = max(
+            best_score,
+            title_match_score(title, candidate_title_de),
+            title_match_score(title, candidate_title_en)
+        )
+    return max(best_score, base_score)
 
 def extract_imdb_title(soup):
     """Extract display title from IMDB movie page."""
@@ -519,19 +546,23 @@ def search_imdb(
                         details = fetch_imdb_movie_details(imdb_id, debug=debug)
                         if not details:
                             continue
-                        if not candidate_matches_titles(details, title_candidates):
+                        title_score = candidate_match_score(details, title_candidates, base_title=search_base)
+                        if title_score <= 0:
                             if debug:
                                 print(f"  Ignoring loosely related result: {details['title']} ({details['year']})")
                             continue
                         results_by_id[imdb_id] = details
+                    title_score = candidate_match_score(details, title_candidates, base_title=search_base)
                     score = candidate_scores.setdefault(imdb_id, {
                         'score': 0,
                         'hits': 0,
                         'clue_hits': 0,
-                        'year_distance': None
+                        'year_distance': None,
+                        'title_score': 0
                     })
-                    score['score'] += term_weight
+                    score['score'] += term_weight + title_score
                     score['hits'] += 1
+                    score['title_score'] = max(score['title_score'], title_score)
                     if is_clue_term:
                         score['clue_hits'] += 1
                     if clue_years:
@@ -566,17 +597,21 @@ def search_imdb(
                         details = fetch_imdb_movie_details(imdb_id, debug=debug)
                         if not details:
                             continue
-                        if not candidate_matches_titles(details, title_candidates):
+                        title_score = candidate_match_score(details, title_candidates, base_title=search_base)
+                        if title_score <= 0:
                             continue
                         results_by_id[imdb_id] = details
+                    title_score = candidate_match_score(details, title_candidates, base_title=search_base)
                     score = candidate_scores.setdefault(imdb_id, {
                         'score': 0,
                         'hits': 0,
                         'clue_hits': 0,
-                        'year_distance': None
+                        'year_distance': None,
+                        'title_score': 0
                     })
-                    score['score'] += term_weight
+                    score['score'] += term_weight + title_score
                     score['hits'] += 1
+                    score['title_score'] = max(score['title_score'], title_score)
                     if is_clue_term:
                         score['clue_hits'] += 1
                     if clue_years:
@@ -602,7 +637,7 @@ def search_imdb(
             clue_year_set = set(clue_years)
             clue_year_matches = [result for result in unique_results if result['year'] in clue_year_set]
 
-        if len(all_results) > 1 and len(years) > 1:
+        if len(unique_results) > 1:
             if target_year:
                 for result in unique_results:
                     if result['year'] == target_year:
@@ -621,6 +656,7 @@ def search_imdb(
             ranked_results = sorted(
                 unique_results,
                 key=lambda result: (
+                    candidate_scores.get(result['imdb_id'], {}).get('title_score', 0),
                     candidate_scores.get(result['imdb_id'], {}).get('clue_hits', 0),
                     candidate_scores.get(result['imdb_id'], {}).get('score', 0),
                     candidate_scores.get(result['imdb_id'], {}).get('hits', 0),
@@ -637,6 +673,7 @@ def search_imdb(
             tied_results = [
                 result for result in ranked_results
                 if (
+                    candidate_scores.get(result['imdb_id'], {}).get('title_score', 0),
                     candidate_scores.get(result['imdb_id'], {}).get('clue_hits', 0),
                     candidate_scores.get(result['imdb_id'], {}).get('score', 0),
                     candidate_scores.get(result['imdb_id'], {}).get('hits', 0),
@@ -646,6 +683,7 @@ def search_imdb(
                         else 999
                     )
                 ) == (
+                    best_metrics.get('title_score', 0),
                     best_metrics.get('clue_hits', 0),
                     best_metrics.get('score', 0),
                     best_metrics.get('hits', 0),
@@ -655,7 +693,9 @@ def search_imdb(
                 )
             ]
             if len(tied_results) == 1 and (
-                best_metrics.get('clue_hits', 0) > 0 or best_metrics.get('hits', 0) > 1
+                best_metrics.get('title_score', 0) > 0 or
+                best_metrics.get('clue_hits', 0) > 0 or
+                best_metrics.get('hits', 0) > 1
             ):
                 if debug:
                     print(
@@ -664,10 +704,13 @@ def search_imdb(
                     )
                 return best_result
             if debug:
-                print(
-                    f"  Multiple versions found with different years {sorted(years)}, "
-                    f"but no year in folder name. Skipping to avoid ambiguity."
-                )
+                if len(years) > 1:
+                    print(
+                        f"  Multiple versions found with different years {sorted(years)}, "
+                        f"but no year in folder name. Skipping to avoid ambiguity."
+                    )
+                else:
+                    print("  Multiple similar IMDB results found. Skipping to avoid ambiguity.")
             return None
 
         result = unique_results[0]
