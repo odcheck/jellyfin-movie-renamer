@@ -165,13 +165,41 @@ def collect_local_year_clues(folder_path, debug=False):
     return unique_years
 
 def collect_metadata_title_clues(folder_path, debug=False):
-    """Collect explicit movie titles from local metadata files."""
+    """Collect likely movie titles from local metadata files."""
     title_clues = []
     title_patterns = [
         r'<title>\s*(.*?)\s*</title>',
         r'<originaltitle>\s*(.*?)\s*</originaltitle>',
+        r'<localtitle>\s*(.*?)\s*</localtitle>',
+        r'<sorttitle>\s*(.*?)\s*</sorttitle>',
         r'^\s*title\s*[:=]\s*(.+?)\s*$',
+        r'^\s*original\s*title\s*[:=]\s*(.+?)\s*$',
+        r'^\s*originaltitle\s*[:=]\s*(.+?)\s*$',
+        r'^\s*german\s*title\s*[:=]\s*(.+?)\s*$',
+        r'^\s*local\s*title\s*[:=]\s*(.+?)\s*$',
+        r'^\s*deutscher?\s*titel\s*[:=]\s*(.+?)\s*$',
     ]
+
+    def maybe_add_title(raw_text):
+        cleaned_title = clean_search_term(raw_text)
+        if not cleaned_title:
+            return
+        words = normalize_title_for_match(cleaned_title)
+        if not words:
+            return
+        # Ignore lines that are mostly technical metadata instead of title clues.
+        technical_tokens = {
+            'audio', 'codec', 'container', 'duration', 'episode', 'file', 'format', 'fps',
+            'genre', 'language', 'plot', 'rating', 'release', 'runtime', 'sample', 'size',
+            'source', 'subtitle', 'summary', 'video'
+        }
+        if len(words) == 1 and len(words[0]) <= 2:
+            title_clues.append(cleaned_title)
+            return
+        if sum(1 for word in words if word in technical_tokens) >= max(1, len(words) // 2):
+            return
+        if len(words) <= 10:
+            title_clues.append(cleaned_title)
 
     try:
         for root, dirs, files in os.walk(folder_path):
@@ -191,9 +219,19 @@ def collect_metadata_title_clues(folder_path, debug=False):
 
                 for pattern in title_patterns:
                     for match in re.findall(pattern, text, flags=re.IGNORECASE | re.MULTILINE):
-                        cleaned_title = clean_search_term(match)
-                        if cleaned_title:
-                            title_clues.append(cleaned_title)
+                        maybe_add_title(match)
+
+                # Also mine generic text content, because many metadata files are inconsistent.
+                for line in text.splitlines():
+                    line = line.strip()
+                    if not line:
+                        continue
+                    maybe_add_title(line)
+                    # Try the right-hand side of free-form key/value lines too.
+                    if ':' in line:
+                        maybe_add_title(line.split(':', 1)[1])
+                    if '=' in line:
+                        maybe_add_title(line.split('=', 1)[1])
     except OSError:
         return []
 
@@ -282,9 +320,8 @@ def titles_match(search_title, candidate_title):
         return False
 
     if len(search_words) == 1:
-        search_word = next(iter(search_words))
-        if len(search_word) <= 2:
-            return candidate_words == search_words
+        # One-word titles are too ambiguous to match by substring alone.
+        return candidate_words == search_words
 
     if search_words.issubset(candidate_words):
         return True
