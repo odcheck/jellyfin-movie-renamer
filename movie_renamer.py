@@ -41,6 +41,7 @@ def transliterate_german(text):
 parser = argparse.ArgumentParser(description='Movie Folder Renamer for Jellyfin')
 parser.add_argument('--input', type=str, help='Read movies from input file')
 parser.add_argument('--generate-inputfile-from', type=str, help='Scan directory and generate input file')
+parser.add_argument('--base-path', type=str, help='Base directory containing the listed movie folders (default: input file header or ~)')
 parser.add_argument('--fileoutput', type=str, default='.', help='Directory to place generated input file (default: current directory)')
 parser.add_argument(
     '--backlog-file',
@@ -59,7 +60,6 @@ parser.add_argument('--debug', action='store_true', help='Enable verbose IMDB se
 args = parser.parse_args()
 
 # Configuration
-BASE_PATH = "/path/to/Source"
 DRY_RUN = not args.execute  # Set to False if --execute is used
 WAIT_TIME = 1  # Seconds between IMDB requests to be respectful
 VIDEO_EXTENSIONS = {
@@ -72,6 +72,22 @@ def derive_related_output_path(base_file, suffix):
     base_root, base_ext = os.path.splitext(base_file)
     extension = base_ext or '.txt'
     return f"{base_root}{suffix}{extension}"
+
+def resolve_base_path(input_file=None):
+    """Resolve the base path for movie processing."""
+    if args.base_path:
+        return os.path.abspath(os.path.expanduser(args.base_path))
+
+    if input_file:
+        try:
+            with open(input_file, 'r', encoding='utf-8', errors='ignore') as handle:
+                first_line = handle.readline().strip()
+            if first_line.startswith('# BASE_PATH='):
+                return os.path.abspath(os.path.expanduser(first_line.split('=', 1)[1].strip()))
+        except OSError:
+            pass
+
+    return HOME_DIR
 
 def read_metadata_text(file_path):
     """Read metadata text using a few common encodings."""
@@ -917,11 +933,11 @@ def sort_video_files(video_files):
         return (has_part, part_value, rel_path.lower(), filename.lower())
     return sorted(video_files, key=key)
 
-def rename_movie_folder(folder_name, debug=False):
+def rename_movie_folder(folder_name, base_path, debug=False):
     """Process and rename a single movie folder"""
     print(f"\nProcessing: {folder_name}")
     
-    folder_path = os.path.join(BASE_PATH, folder_name)
+    folder_path = os.path.join(base_path, folder_name)
     
     # Check if folder exists
     if not os.path.isdir(folder_path):
@@ -968,7 +984,7 @@ def rename_movie_folder(folder_name, debug=False):
     
     # Create new folder name strictly from lookup title.
     new_folder_name = create_folder_name(movie_info)
-    new_folder_path = os.path.join(BASE_PATH, new_folder_name)
+    new_folder_path = os.path.join(base_path, new_folder_name)
     
     print(f"  New folder name: {new_folder_name}")
     
@@ -1074,10 +1090,12 @@ def main():
     # Handle generate input file mode
     if args.generate_inputfile_from:
         print(f"Scanning directory: {args.generate_inputfile_from}")
-        movies = scan_directory_for_movies(args.generate_inputfile_from)
+        source_dir = os.path.abspath(os.path.expanduser(args.generate_inputfile_from))
+        movies = scan_directory_for_movies(source_dir)
         output_file = os.path.join(args.fileoutput, 'movielist.txt')
         try:
-            with open(output_file, 'w') as f:
+            with open(output_file, 'w', encoding='utf-8') as f:
+                f.write(f"# BASE_PATH={source_dir}\n")
                 for movie in movies:
                     f.write(movie + '\n')
             print(f"Generated input file: {output_file} with {len(movies)} movie folders")
@@ -1091,16 +1109,21 @@ def main():
     
     # Load movies from input file
     try:
-        with open(args.input, 'r') as f:
-            movies_to_process = [line.strip() for line in f if line.strip()]
+        with open(args.input, 'r', encoding='utf-8', errors='ignore') as f:
+            movies_to_process = [
+                line.strip() for line in f
+                if line.strip() and not line.strip().startswith('#')
+            ]
         print(f"Loaded {len(movies_to_process)} movies from {args.input}")
     except Exception as e:
         print(f"Error reading input file {args.input}: {e}")
         return
+
+    base_path = resolve_base_path(args.input)
     
     print("Movie Folder Renamer for Jellyfin")
     print("=" * 50)
-    print(f"Base path: {BASE_PATH}")
+    print(f"Base path: {base_path}")
     print(f"Dry run mode: {DRY_RUN}")
     print(f"Processing {len(movies_to_process)} movies")
     
@@ -1124,7 +1147,7 @@ def main():
     for i, movie_folder in enumerate(movies_to_process, 1):
         print(f"\n[{i}/{len(movies_to_process)}]", end="")
         
-        result = rename_movie_folder(movie_folder, debug=args.debug)
+        result = rename_movie_folder(movie_folder, base_path, debug=args.debug)
         if result is False:
             # IMDB lookup failed
             skipped_count += 1
