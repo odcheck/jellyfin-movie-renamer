@@ -132,6 +132,12 @@ def clean_search_term(folder_name):
     """Clean folder name for IMDB search"""
     clean_name = folder_name
 
+    # Normalize separators first so release-tag stripping can match words
+    # surrounded by underscores, dots, or dashes.
+    clean_name = clean_name.replace('.', ' ')
+    clean_name = clean_name.replace('_', ' ')
+    clean_name = clean_name.replace('-', ' ')
+
     # Remove container metadata and common release tags.
     clean_name = re.sub(r'\s*\[\s*.*?\s*\]', ' ', clean_name)
     clean_name = re.sub(r'\s*\{\s*.*?\s*\}', ' ', clean_name)
@@ -140,16 +146,13 @@ def clean_search_term(folder_name):
     clean_name = re.sub(
         r'\b(?:german|dubbed|uncut|director(?:s)?\s*cut|extended|remastered|'
         r'bluray|brrip|bdrip|dvdrip|webrip|web-dl|xvid|x264|x265|h\.?264|h\.?265|'
-        r'1080p|720p|2160p|uhd|hd|sd|ac3|dts|videomann)\b',
+        r'1080p|720p|2160p|uhd|hd|sd|ac3|dts|r5|videomann)\b',
         ' ',
         clean_name,
         flags=re.IGNORECASE
     )
     clean_name = re.sub(r'\bby\s+[A-Za-z0-9_-]+\b', ' ', clean_name, flags=re.IGNORECASE)
     clean_name = re.sub(r'\bby\b', ' ', clean_name, flags=re.IGNORECASE)
-    clean_name = clean_name.replace('.', ' ')
-    clean_name = clean_name.replace('_', ' ')
-    clean_name = clean_name.replace('-', ' ')
     clean_name = re.sub(r'\s+', ' ', clean_name).strip()
     return clean_name
 
@@ -354,6 +357,7 @@ def sanitize_title_for_fs(title):
 def normalize_title_for_match(title):
     """Normalize a title for fuzzy title comparison."""
     title = transliterate_german((title or '').lower())
+    title = re.sub(r"['`´]", '', title)
     title = re.sub(r'[\(\)\[\]\{\}]', ' ', title)
     title = re.sub(r'[^a-z0-9 ]+', ' ', title)
     words = [word for word in title.split() if word]
@@ -361,7 +365,10 @@ def normalize_title_for_match(title):
         'a', 'an', 'and', 'das', 'dem', 'den', 'der', 'des', 'die', 'ein', 'eine', 'einer',
         'eines', 'im', 'in', 'of', 'the', 'und', 'von', 'zu', 'zum', 'zur'
     }
-    filtered_words = [word for word in words if word not in stop_words and len(word) > 1]
+    filtered_words = [
+        word for word in words
+        if word not in stop_words and (len(word) > 1 or word.isdigit())
+    ]
     return filtered_words or words
 
 def titles_match(search_title, candidate_title):
@@ -370,10 +377,27 @@ def titles_match(search_title, candidate_title):
 
 def title_match_score(search_title, candidate_title):
     """Return a quality score for how well a candidate title matches the search title."""
-    search_words = set(normalize_title_for_match(search_title))
-    candidate_words = set(normalize_title_for_match(candidate_title))
+    search_list = normalize_title_for_match(search_title)
+    candidate_list = normalize_title_for_match(candidate_title)
+    search_words = set(search_list)
+    candidate_words = set(candidate_list)
 
     if not search_words or not candidate_words:
+        return 0
+
+    if search_list == candidate_list:
+        if len(search_list) == 1:
+            return 300
+        return 250
+
+    if search_words == candidate_words and len(search_list) <= 4 and len(candidate_list) <= 4:
+        order_ratio = difflib.SequenceMatcher(
+            None,
+            ' '.join(search_list),
+            ' '.join(candidate_list)
+        ).ratio()
+        if order_ratio >= 0.9:
+            return 220
         return 0
 
     if len(search_words) == 1:
@@ -392,15 +416,49 @@ def title_match_score(search_title, candidate_title):
 
     overlap = search_words & candidate_words
     if search_words.issubset(candidate_words):
+        subseq_index = 0
+        for word in candidate_list:
+            if subseq_index < len(search_list) and word == search_list[subseq_index]:
+                subseq_index += 1
+        if subseq_index < len(search_list):
+            return 0
         extra_words = candidate_words - search_words
         exact_bonus = 50 if candidate_words == search_words else 0
         return 200 + exact_bonus - (len(extra_words) * 15)
+
+    if candidate_words.issubset(search_words) and len(candidate_words) >= 3:
+        subseq_index = 0
+        for word in search_list:
+            if subseq_index < len(candidate_list) and word == candidate_list[subseq_index]:
+                subseq_index += 1
+        if subseq_index < len(candidate_list):
+            return 0
+        missing_words = search_words - candidate_words
+        return 170 - (len(missing_words) * 12)
 
     minimum_overlap = len(search_words) - 1
     if len(overlap) >= minimum_overlap:
         extra_words = candidate_words - search_words
         return 100 + (len(overlap) * 10) - (len(extra_words) * 20)
     return 0
+
+def build_title_variants(title):
+    """Build a few safe title variants from a local title string."""
+    variants = []
+    cleaned_title = clean_search_term(title or '')
+    if cleaned_title:
+        variants.append(cleaned_title)
+
+        words = cleaned_title.split()
+        if len(words) >= 3:
+            variants.append(' '.join(words[:3]))
+
+        if ':' in cleaned_title:
+            variants.append(cleaned_title.split(':', 1)[0].strip())
+        if ' - ' in cleaned_title:
+            variants.append(cleaned_title.split(' - ', 1)[0].strip())
+
+    return [variant for variant in dict.fromkeys(variant for variant in variants if variant)]
 
 def candidate_matches_titles(details, title_candidates, base_title=None):
     """Check whether IMDB result matches trusted local titles without ignoring the folder title."""
@@ -411,10 +469,14 @@ def candidate_match_score(details, title_candidates, base_title=None):
     candidate_title_de = details.get('title')
     candidate_title_en = details.get('title_en')
     if base_title:
-        base_score = max(
-            title_match_score(base_title, candidate_title_de),
-            title_match_score(base_title, candidate_title_en)
-        )
+        base_variants = build_title_variants(base_title)
+        base_score = 0
+        for variant in base_variants:
+            base_score = max(
+                base_score,
+                title_match_score(variant, candidate_title_de),
+                title_match_score(variant, candidate_title_en)
+            )
         if base_score <= 0:
             return 0
     else:
@@ -569,6 +631,26 @@ def find_search_result_link(soup, imdb_id):
             return link
     return None
 
+def is_feature_candidate_link(link):
+    """Reject obvious podcast/episode/short-form search results."""
+    if not link:
+        return False
+
+    context_parts = []
+    ancestor = link
+    for _ in range(4):
+        ancestor = ancestor.parent
+        if not ancestor:
+            break
+        context_parts.append(ancestor.get_text(" ", strip=True))
+    context_text = ' '.join(context_parts).lower()
+
+    blocked_terms = (
+        'podcast', 'rss feed', 'episode', 'folge', 'tv episode',
+        'kurzfilm', 'short'
+    )
+    return not any(term in context_text for term in blocked_terms)
+
 def extract_search_result_candidate(link, imdb_id, english_soup=None):
     """Build a candidate directly from localized IMDb search-result HTML."""
     title_text = extract_search_result_title(link)
@@ -678,6 +760,10 @@ def search_imdb(
                 href = link.get('href', '')
                 if debug:
                     print(f"DEBUG: Link {i}: {href}")
+                if not is_feature_candidate_link(link):
+                    if debug:
+                        print("  Ignoring non-feature result from IMDb search page")
+                    continue
                 title_match = re.search(r'/title/(tt\d+)/', href)
                 if title_match:
                     imdb_id = title_match.group(1)
@@ -729,6 +815,8 @@ def search_imdb(
             for result in results[:8]:
                 link = result.find('a')
                 if not link:
+                    continue
+                if not is_feature_candidate_link(link):
                     continue
                 href = link.get('href', '')
                 title_match = re.search(r'/title/(tt\d+)/', href)
