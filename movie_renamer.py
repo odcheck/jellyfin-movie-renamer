@@ -521,8 +521,16 @@ def fetch_imdb_movie_details(imdb_id, debug=False):
         'imdb_id': imdb_id
     }
 
-def extract_search_result_candidate(link, imdb_id):
-    """Build a candidate directly from the IMDb search-result HTML."""
+def build_imdb_search_headers(language_header='de-DE,de;q=0.9,en-US;q=0.8,en;q=0.7'):
+    """Build IMDb search headers for a chosen localization."""
+    return {
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 '
+                      '(KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36',
+        'Accept-Language': language_header
+    }
+
+def extract_search_result_title(link):
+    """Extract a display title from an IMDb search-result node."""
     title_text = link.get_text(" ", strip=True)
     if not title_text:
         heading = link.find('h3')
@@ -531,9 +539,10 @@ def extract_search_result_candidate(link, imdb_id):
         aria_label = link.get('aria-label', '')
         match = re.search(r'for\s+(.+)$', aria_label)
         title_text = match.group(1).strip() if match else ''
-    if not title_text:
-        return None
+    return title_text or None
 
+def extract_search_result_year(link):
+    """Extract a release year from an IMDb search-result node."""
     year = None
     ancestor = link
     for _ in range(6):
@@ -544,15 +553,44 @@ def extract_search_result_candidate(link, imdb_id):
         if year_match:
             year = year_match.group(1)
             break
+    return year
+
+def find_search_result_link(soup, imdb_id):
+    """Find the best title link for a given IMDb ID within a search-result page."""
+    if not soup:
+        return None
+    preferred_patterns = [
+        rf'/title/{imdb_id}/.*ref_=fn_t_',
+        rf'/title/{imdb_id}/'
+    ]
+    for pattern in preferred_patterns:
+        link = soup.find('a', href=re.compile(pattern))
+        if link:
+            return link
+    return None
+
+def extract_search_result_candidate(link, imdb_id, english_soup=None):
+    """Build a candidate directly from localized IMDb search-result HTML."""
+    title_text = extract_search_result_title(link)
+    if not title_text:
+        return None
+
+    year = extract_search_result_year(link)
 
     if not year:
         return None
 
     title_text = re.sub(r'\s*\((?:19|20)\d{2}\)\s*$', '', title_text).strip()
+    english_title = title_text
+    english_link = find_search_result_link(english_soup, imdb_id)
+    if english_link:
+        extracted_english_title = extract_search_result_title(english_link)
+        if extracted_english_title:
+            english_title = re.sub(r'\s*\((?:19|20)\d{2}\)\s*$', '', extracted_english_title).strip()
     return {
         'title': title_text,
         'title_de': title_text,
-        'title_en': title_text,
+        'title_en': english_title,
         'year': year,
         'imdb_id': imdb_id
     }
@@ -615,14 +653,24 @@ def search_imdb(
                 term_weight += 3
 
             search_url = f"https://www.imdb.com/find?q={quote_plus(search_term)}&s=tt"
-            headers = {
-                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'
-            }
+            headers = build_imdb_search_headers()
             response = requests.get(search_url, headers=headers, timeout=10)
             response.raise_for_status()
             soup = BeautifulSoup(response.content, 'html.parser')
 
-            title_links = soup.find_all('a', href=re.compile(r'/title/tt\d+/'))
+            english_soup = None
+            try:
+                response_en = requests.get(
+                    search_url,
+                    headers=build_imdb_search_headers('en-US,en;q=0.9'),
+                    timeout=10
+                )
+                response_en.raise_for_status()
+                english_soup = BeautifulSoup(response_en.content, 'html.parser')
+            except Exception:
+                english_soup = None
+
+            title_links = soup.find_all('a', href=re.compile(r'/title/tt\d+/.*ref_=fn_t_'))
             if debug:
                 print(f"DEBUG: Processing {len(title_links)} title links")
 
@@ -638,12 +686,12 @@ def search_imdb(
                     else:
                         if imdb_id in seen_ids:
                             continue
-                        seen_ids.add(imdb_id)
                         details = fetch_imdb_movie_details(imdb_id, debug=debug)
                         if not details:
-                            details = extract_search_result_candidate(link, imdb_id)
+                            details = extract_search_result_candidate(link, imdb_id, english_soup=english_soup)
                         if not details:
                             continue
+                        seen_ids.add(imdb_id)
                         title_score = candidate_match_score(details, title_candidates, base_title=search_base)
                         if title_score <= 0:
                             if debug:
@@ -691,12 +739,12 @@ def search_imdb(
                     else:
                         if imdb_id in seen_ids:
                             continue
-                        seen_ids.add(imdb_id)
                         details = fetch_imdb_movie_details(imdb_id, debug=debug)
                         if not details:
-                            details = extract_search_result_candidate(link, imdb_id)
+                            details = extract_search_result_candidate(link, imdb_id, english_soup=english_soup)
                         if not details:
                             continue
+                        seen_ids.add(imdb_id)
                         title_score = candidate_match_score(details, title_candidates, base_title=search_base)
                         if title_score <= 0:
                             continue
@@ -829,9 +877,7 @@ def debug_imdb_search(movie_title):
         search_url = f"https://www.imdb.com/find?q={quote_plus(movie_title)}&s=tt"
         print(f"DEBUG: Searching URL: {search_url}")
         
-        headers = {
-            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'
-        }
+        headers = build_imdb_search_headers()
         
         response = requests.get(search_url, headers=headers, timeout=10)
         print(f"DEBUG: Response status: {response.status_code}")
