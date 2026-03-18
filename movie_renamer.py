@@ -1098,6 +1098,17 @@ def has_dvd_structure(folder_path):
         return False
     return False
 
+def has_iso_image(folder_path):
+    """Detect ISO disc images that should be preserved like DVD folders."""
+    try:
+        for item in os.listdir(folder_path):
+            item_path = os.path.join(folder_path, item)
+            if os.path.isfile(item_path) and item.lower().endswith('.iso'):
+                return True
+    except OSError:
+        return False
+    return False
+
 def create_folder_name(movie_info):
     """Create Jellyfin-compliant folder name from lookup title and year."""
     clean_title = sanitize_title_for_fs(movie_info['title'])
@@ -1194,6 +1205,7 @@ def rename_movie_folder(folder_name, base_path, debug=False):
     # Get video files (now returns list of (rel_path, filename) tuples)
     video_files = get_video_files(folder_path)
     dvd_structure = has_dvd_structure(folder_path)
+    iso_image = has_iso_image(folder_path)
     print(f"  Found {len(video_files)} video file(s)")
     for rel_path, filename in video_files:
         if rel_path:
@@ -1202,12 +1214,15 @@ def rename_movie_folder(folder_name, base_path, debug=False):
             print(f"    {filename}")
     if dvd_structure and not video_files:
         print("  Detected DVD VIDEO_TS structure; folder will be renamed but DVD files kept unchanged")
+    if iso_image and not video_files:
+        print("  Detected ISO image; folder will be renamed but ISO files kept unchanged")
 
     result_info = {
         'original_folder': folder_name,
         'new_folder': new_folder_name,
-        'has_videos': len(video_files) > 0 or dvd_structure,
+        'has_videos': len(video_files) > 0 or dvd_structure or iso_image,
         'dvd_structure': dvd_structure,
+        'iso_image': iso_image,
         'video_moves': []
     }
     
@@ -1231,6 +1246,8 @@ def rename_movie_folder(folder_name, base_path, debug=False):
                 print(f"    Rename: {filename} -> {new_video_name}")
         if dvd_structure and not all_video_files:
             print("    DVD structure preserved: VIDEO_TS contents stay unchanged")
+        if iso_image and not all_video_files:
+            print("    ISO image preserved: disc image stays unchanged")
     else:
         try:
             # Rename folder unless already in the target name.
@@ -1279,6 +1296,8 @@ def rename_movie_folder(folder_name, base_path, debug=False):
 
             if dvd_structure and not all_video_files:
                 print("    Preserved DVD structure inside VIDEO_TS")
+            if iso_image and not all_video_files:
+                print("    Preserved ISO image inside movie folder")
             
             # Remove empty subfolders
             for subfolder_path in sorted(subfolders_to_remove, reverse=True):  # Remove deepest first
