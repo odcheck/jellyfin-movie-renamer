@@ -211,6 +211,12 @@ def collect_metadata_title_clues(folder_path, debug=False):
     ]
 
     def maybe_add_title(raw_text):
+        if not raw_text:
+            return
+        # Skip obvious ASCII art / binary garbage / low-signal lines from scene NFOs.
+        signal_chars = re.findall(r'[A-Za-z0-9ÄÖÜäöüß]', raw_text)
+        if len(signal_chars) < 4:
+            return
         cleaned_title = clean_search_term(raw_text)
         if not cleaned_title:
             return
@@ -382,8 +388,15 @@ def title_match_score(search_title, candidate_title):
     candidate_list = normalize_title_for_match(candidate_title)
     search_words = set(search_list)
     candidate_words = set(candidate_list)
+    search_numbers = {word for word in search_list if word.isdigit()}
+    candidate_numbers = {word for word in candidate_list if word.isdigit()}
 
     if not search_words or not candidate_words:
+        return 0
+
+    # If both titles carry explicit numbers, they must agree. This prevents
+    # false matches like "Ice Age 2" -> "2012: Ice Age".
+    if search_numbers and candidate_numbers and search_numbers != candidate_numbers:
         return 0
 
     if search_list == candidate_list:
@@ -700,7 +713,7 @@ def is_feature_candidate_link(link):
 
     blocked_terms = (
         'podcast', 'rss feed', 'episode', 'folge', 'tv episode',
-        'kurzfilm', 'short'
+        'kurzfilm', 'short', 'video game', 'videospiel', 'making of'
     )
     return not any(term in context_text for term in blocked_terms)
 
