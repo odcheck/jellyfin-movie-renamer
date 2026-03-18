@@ -63,7 +63,8 @@ args = parser.parse_args()
 DRY_RUN = not args.execute  # Set to False if --execute is used
 WAIT_TIME = 1  # Seconds between IMDB requests to be respectful
 VIDEO_EXTENSIONS = {
-    '.mkv', '.mp4', '.avi', '.mov', '.wmv', '.flv', '.webm', '.m4v', '.m2ts', '.mts', '.ts'
+    '.mkv', '.mp4', '.avi', '.mov', '.wmv', '.flv', '.webm', '.m4v', '.m2ts', '.mts', '.ts',
+    '.mpg', '.mpeg'
 }
 TEXT_METADATA_EXTENSIONS = {'.nfo', '.txt', '.xml'}
 
@@ -583,6 +584,58 @@ def fetch_imdb_movie_details(imdb_id, debug=False):
         'imdb_id': imdb_id
     }
 
+def fetch_imdb_details_from_search(imdb_id, search_terms, debug=False):
+    """Recover IMDb details from localized search results when the title page blocks direct fetches."""
+    terms = []
+    for term in search_terms or []:
+        cleaned_term = clean_search_term(term)
+        if cleaned_term and cleaned_term not in terms:
+            terms.append(cleaned_term)
+    if not terms:
+        terms.append(imdb_id)
+    elif imdb_id not in terms:
+        terms.append(imdb_id)
+
+    for search_term in terms:
+        search_url = f"https://www.imdb.com/find?q={quote_plus(search_term)}&s=tt"
+        try:
+            response_de = requests.get(
+                search_url,
+                headers=build_imdb_search_headers(),
+                timeout=10
+            )
+            response_de.raise_for_status()
+            soup_de = BeautifulSoup(response_de.content, 'html.parser')
+
+            response_en = requests.get(
+                search_url,
+                headers=build_imdb_search_headers('en-US,en;q=0.9'),
+                timeout=10
+            )
+            response_en.raise_for_status()
+            soup_en = BeautifulSoup(response_en.content, 'html.parser')
+        except Exception as exc:
+            if debug:
+                print(f"  Search fallback failed for IMDb ID {imdb_id} via '{search_term}': {exc}")
+            continue
+
+        link = find_search_result_link(soup_de, imdb_id)
+        if not link:
+            continue
+        candidate = extract_search_result_candidate(link, imdb_id, english_soup=soup_en)
+        if candidate:
+            if search_term != imdb_id:
+                match_score = max(
+                    title_match_score(search_term, candidate.get('title')),
+                    title_match_score(search_term, candidate.get('title_en'))
+                )
+                if match_score <= 0:
+                    continue
+            if debug:
+                print(f"  Recovered IMDb details for {imdb_id} from search term '{search_term}'")
+            return candidate
+    return None
+
 def build_imdb_search_headers(language_header='de-DE,de;q=0.9,en-US;q=0.8,en;q=0.7'):
     """Build IMDb search headers for a chosen localization."""
     return {
@@ -1030,6 +1083,21 @@ def get_video_files(folder_path):
         
     return video_files
 
+def has_dvd_structure(folder_path):
+    """Detect a classic DVD folder that should keep its VIDEO_TS contents untouched."""
+    video_ts_path = os.path.join(folder_path, 'VIDEO_TS')
+    if not os.path.isdir(video_ts_path):
+        return False
+
+    try:
+        for item in os.listdir(video_ts_path):
+            upper_name = item.upper()
+            if upper_name.endswith('.IFO') or upper_name.endswith('.VOB') or upper_name.endswith('.BUP'):
+                return True
+    except OSError:
+        return False
+    return False
+
 def create_folder_name(movie_info):
     """Create Jellyfin-compliant folder name from lookup title and year."""
     clean_title = sanitize_title_for_fs(movie_info['title'])
@@ -1082,23 +1150,24 @@ def rename_movie_folder(folder_name, base_path, debug=False):
     if debug:
         print(f"  Searching IMDB for: '{folder_name}'")
 
-    clue_years = []
-    clue_terms = []
-    metadata_titles = []
-    metadata_imdb_ids = []
-    if not has_year_in_folder_name(folder_name):
-        clue_years = collect_local_year_clues(folder_path, debug=debug)
-        metadata_titles = collect_metadata_title_clues(folder_path, debug=debug)
-        clue_terms = collect_local_search_clues(folder_path, folder_name, debug=debug)
-        metadata_imdb_ids = collect_imdb_id_clues(folder_path, debug=debug)
+    clue_years = collect_local_year_clues(folder_path, debug=debug)
+    clue_terms = collect_local_search_clues(folder_path, folder_name, debug=debug)
+    metadata_titles = collect_metadata_title_clues(folder_path, debug=debug)
+    metadata_imdb_ids = collect_imdb_id_clues(folder_path, debug=debug)
     
     # Search IMDB
     if len(metadata_imdb_ids) == 1:
         if debug:
             print(f"  Using IMDb ID from metadata: {metadata_imdb_ids[0]}")
         movie_info = fetch_imdb_movie_details(metadata_imdb_ids[0], debug=debug)
+        if not movie_info:
+            movie_info = fetch_imdb_details_from_search(
+                metadata_imdb_ids[0],
+                [folder_name] + metadata_titles + clue_terms,
+                debug=debug
+            )
         if not movie_info and debug:
-            print("  Direct IMDb ID fetch failed, falling back to title-based search with metadata clues")
+            print("  IMDb ID recovery failed, falling back to title-based search with metadata clues")
     else:
         movie_info = None
 
@@ -1124,17 +1193,21 @@ def rename_movie_folder(folder_name, base_path, debug=False):
     
     # Get video files (now returns list of (rel_path, filename) tuples)
     video_files = get_video_files(folder_path)
+    dvd_structure = has_dvd_structure(folder_path)
     print(f"  Found {len(video_files)} video file(s)")
     for rel_path, filename in video_files:
         if rel_path:
             print(f"    {rel_path}/{filename}")
         else:
             print(f"    {filename}")
+    if dvd_structure and not video_files:
+        print("  Detected DVD VIDEO_TS structure; folder will be renamed but DVD files kept unchanged")
 
     result_info = {
         'original_folder': folder_name,
         'new_folder': new_folder_name,
-        'has_videos': len(video_files) > 0,
+        'has_videos': len(video_files) > 0 or dvd_structure,
+        'dvd_structure': dvd_structure,
         'video_moves': []
     }
     
@@ -1156,6 +1229,8 @@ def rename_movie_folder(folder_name, base_path, debug=False):
                 print(f"    Move and rename: {rel_path}/{filename} -> {new_video_name}")
             else:
                 print(f"    Rename: {filename} -> {new_video_name}")
+        if dvd_structure and not all_video_files:
+            print("    DVD structure preserved: VIDEO_TS contents stay unchanged")
     else:
         try:
             # Rename folder unless already in the target name.
@@ -1201,6 +1276,9 @@ def rename_movie_folder(folder_name, base_path, debug=False):
                     source_display = f"{rel_path}/{filename}" if rel_path else filename
                     result_info['video_moves'].append((source_display, new_video_name))
                     print(f"    Renamed video: {filename} -> {new_video_name}")
+
+            if dvd_structure and not all_video_files:
+                print("    Preserved DVD structure inside VIDEO_TS")
             
             # Remove empty subfolders
             for subfolder_path in sorted(subfolders_to_remove, reverse=True):  # Remove deepest first
