@@ -210,8 +210,10 @@ def collect_metadata_title_clues(folder_path, debug=False):
         r'^\s*deutscher?\s*titel\s*[:=]\s*(.+?)\s*$',
     ]
 
-    def maybe_add_title(raw_text):
+    def maybe_add_title(raw_text, explicit=False):
         if not raw_text:
+            return
+        if raw_text.lstrip().startswith('<?xml'):
             return
         # Skip obvious ASCII art / binary garbage / low-signal lines from scene NFOs.
         signal_chars = re.findall(r'[A-Za-z0-9ÄÖÜäöüß]', raw_text)
@@ -226,15 +228,25 @@ def collect_metadata_title_clues(folder_path, debug=False):
         # Ignore lines that are mostly technical metadata instead of title clues.
         technical_tokens = {
             'audio', 'codec', 'container', 'duration', 'episode', 'file', 'format', 'fps',
-            'genre', 'language', 'plot', 'rating', 'release', 'runtime', 'sample', 'size',
-            'source', 'subtitle', 'summary', 'video'
+            'genre', 'genres', 'language', 'plot', 'rating', 'release', 'runtime', 'sample',
+            'size', 'source', 'subtitle', 'summary', 'video', 'added', 'actor', 'actors',
+            'awards', 'budget', 'country', 'description', 'director', 'directors', 'drama',
+            'fantasy', 'frankreich', 'france', 'genres', 'horror', 'imdbrating', 'languagecode',
+            'mystery', 'outline', 'persons', 'plot', 'popularity', 'productionyear', 'revenue',
+            'role', 'roles', 'runningtime', 'sorttitle', 'studio', 'studios', 'synopsis',
+            'tag', 'tags', 'thriller', 'tmdbid', 'votes', 'writerslist'
         }
-        if len(words) == 1 and len(words[0]) <= 2:
+        if explicit and len(words) == 1 and len(words[0]) <= 2:
             title_clues.append(cleaned_title)
+            return
+        if not explicit and len(words) <= 1:
+            return
+        if not explicit and len(words) > 5 and re.search(r'[,:;.!?]', raw_text):
             return
         if sum(1 for word in words if word in technical_tokens) >= max(1, len(words) // 2):
             return
-        if len(words) <= 10:
+        max_words = 10 if explicit else 6
+        if len(words) <= max_words:
             title_clues.append(cleaned_title)
 
     try:
@@ -253,19 +265,23 @@ def collect_metadata_title_clues(folder_path, debug=False):
 
                 for pattern in title_patterns:
                     for match in re.findall(pattern, text, flags=re.IGNORECASE | re.MULTILINE):
-                        maybe_add_title(match)
+                        maybe_add_title(match, explicit=True)
 
                 # Also mine generic text content, because many metadata files are inconsistent.
                 for line in text.splitlines():
                     line = line.strip()
                     if not line:
                         continue
-                    maybe_add_title(line)
+                    maybe_add_title(line, explicit=False)
                     # Try the right-hand side of free-form key/value lines too.
                     if ':' in line:
-                        maybe_add_title(line.split(':', 1)[1])
+                        key = clean_search_term(line.split(':', 1)[0]).lower()
+                        if key and ('title' in key or 'titel' in key or 'original' in key or 'sort' in key):
+                            maybe_add_title(line.split(':', 1)[1], explicit=True)
                     if '=' in line:
-                        maybe_add_title(line.split('=', 1)[1])
+                        key = clean_search_term(line.split('=', 1)[0]).lower()
+                        if key and ('title' in key or 'titel' in key or 'original' in key or 'sort' in key):
+                            maybe_add_title(line.split('=', 1)[1], explicit=True)
     except OSError:
         return []
 
@@ -314,6 +330,10 @@ def collect_local_search_clues(folder_path, original_folder_name, debug=False):
     """Collect extra search phrases from filenames and relevant metadata lines."""
     clue_terms = []
     target_words = set(normalize_title_for_match(original_folder_name))
+    ignored_stems = {
+        'backdrop', 'banner', 'cdart', 'clearart', 'fanart', 'folder', 'logo',
+        'movie', 'poster', 'sample'
+    }
 
     try:
         for root, dirs, files in os.walk(folder_path):
@@ -325,7 +345,7 @@ def collect_local_search_clues(folder_path, original_folder_name, debug=False):
                 ext = ext.lower()
 
                 cleaned_stem = clean_search_term(file_stem)
-                if cleaned_stem:
+                if cleaned_stem and cleaned_stem.lower() not in ignored_stems:
                     clue_terms.append(cleaned_stem)
 
                 if ext in TEXT_METADATA_EXTENSIONS:
@@ -597,13 +617,42 @@ def fetch_imdb_movie_details(imdb_id, debug=False):
         'imdb_id': imdb_id
     }
 
+def is_generic_imdb_title(title):
+    """Reject generic IMDb labels that are not actual movie titles."""
+    normalized = clean_search_term(title or '').lower()
+    generic_phrases = (
+        'besetzung und crew mitglieder',
+        'cast and crew',
+        'cast crew',
+        'full cast crew',
+        'mitglieder',
+    )
+    return any(phrase in normalized for phrase in generic_phrases)
+
+def expand_search_term_variants(term):
+    """Add a few safe sequel-title variants for search recovery."""
+    cleaned = clean_search_term(term or '')
+    variants = [cleaned] if cleaned else []
+
+    replacements = [
+        (r'\bthe next chapter\b', '2'),
+        (r'\bpart ii\b', '2'),
+        (r'\bpart 2\b', '2'),
+    ]
+    for pattern, replacement in replacements:
+        if re.search(pattern, cleaned, flags=re.IGNORECASE):
+            variant = re.sub(pattern, replacement, cleaned, flags=re.IGNORECASE).strip()
+            if variant and variant not in variants:
+                variants.append(variant)
+    return variants
+
 def fetch_imdb_details_from_search(imdb_id, search_terms, debug=False):
     """Recover IMDb details from localized search results when the title page blocks direct fetches."""
     terms = []
     for term in search_terms or []:
-        cleaned_term = clean_search_term(term)
-        if cleaned_term and cleaned_term not in terms:
-            terms.append(cleaned_term)
+        for variant in expand_search_term_variants(term):
+            if variant and variant not in terms:
+                terms.append(variant)
     if not terms:
         terms.append(imdb_id)
     elif imdb_id not in terms:
@@ -637,6 +686,8 @@ def fetch_imdb_details_from_search(imdb_id, search_terms, debug=False):
             continue
         candidate = extract_search_result_candidate(link, imdb_id, english_soup=soup_en)
         if candidate:
+            if is_generic_imdb_title(candidate.get('title')):
+                continue
             if search_term != imdb_id:
                 match_score = max(
                     title_match_score(search_term, candidate.get('title')),
@@ -761,11 +812,27 @@ def search_imdb(
 
         search_terms = []
         for title in title_candidates:
-            search_terms.extend([
-                title,
-                title.split(' - ')[0].strip(),
-                ' '.join(title.split()[:3]),
-            ])
+            search_terms.append(title)
+
+            split_title = title.split(' - ')[0].strip()
+            if split_title and split_title != title:
+                search_terms.append(split_title)
+
+            prefix_words = title.split()
+            if len(prefix_words) >= 3:
+                short_prefix = ' '.join(prefix_words[:3]).strip()
+                bad_terminal_words = {
+                    'a', 'an', 'das', 'de', 'del', 'dem', 'den', 'der', 'des',
+                    'die', 'du', 'ein', 'eine', 'einer', 'eines', 'la', 'le',
+                    'les', 'of', 'the', 'und', 'von'
+                }
+                if (
+                    len(prefix_words) <= 4 and
+                    prefix_words[2].lower() not in bad_terminal_words and
+                    short_prefix != title and
+                    short_prefix != split_title
+                ):
+                    search_terms.append(short_prefix)
         if clue_years:
             for clue_year in clue_years:
                 for title in title_candidates:
