@@ -21,6 +21,7 @@ import shutil
 HOME_DIR = os.path.expanduser("~")
 DEFAULT_BACKLOG_FILE = os.path.join(HOME_DIR, "backlog.txt")
 DEFAULT_SUCCESS_FILE = os.path.join(HOME_DIR, "success.txt")
+WIKIDATA_GERMAN_TITLE_CACHE = {}
 
 def transliterate_german(text):
     """Transliterate German umlauts and ß to ASCII equivalents"""
@@ -852,6 +853,90 @@ def choose_preferred_local_title(candidate, search_terms, matched_search_term=No
     if cleaned_matched_term and is_presentable_local_title(cleaned_matched_term):
         return cleaned_matched_term
     return candidate.get('title')
+
+def normalize_wikidata_german_title(title):
+    """Strip common Wikidata/Wikipedia disambiguators from German article titles."""
+    cleaned = (title or '').strip()
+    if not cleaned:
+        return None
+    cleaned = re.sub(
+        r'\s*\((?:\d{4}|film|fernsehfilm|fernsehserie|miniserie|serie|zeichentrickfilm|'
+        r'dokumentarfilm|us-amerikanischer film|deutscher film|britischer film|'
+        r'franzoesischer film|französischer film|italienischer film|japanischer film|'
+        r'suedkoreanischer film|südkoreanischer film|spanischer film|oesterreichischer film|'
+        r'österreichischer film|schweizer film)[^)]*\)\s*$',
+        '',
+        cleaned,
+        flags=re.IGNORECASE
+    ).strip()
+    return cleaned or None
+
+def fetch_wikidata_german_title(imdb_id, debug=False):
+    """Look up a German title by IMDb ID via Wikidata as a fallback when IMDb JSON is English-only."""
+    if not imdb_id:
+        return None
+    if imdb_id in WIKIDATA_GERMAN_TITLE_CACHE:
+        return WIKIDATA_GERMAN_TITLE_CACHE[imdb_id]
+
+    query = f'''
+    SELECT ?deTitle WHERE {{
+      ?item wdt:P345 "{imdb_id}".
+      ?deArticle schema:about ?item ;
+                 schema:isPartOf <https://de.wikipedia.org/> ;
+                 schema:name ?deTitle .
+    }} LIMIT 1
+    '''
+    try:
+        response = requests.get(
+            'https://query.wikidata.org/sparql',
+            params={'format': 'json', 'query': query},
+            headers={'User-Agent': 'Mozilla/5.0'},
+            timeout=12
+        )
+        response.raise_for_status()
+        data = response.json()
+        bindings = data.get('results', {}).get('bindings', [])
+        if bindings:
+            title = bindings[0].get('deTitle', {}).get('value')
+            normalized = normalize_wikidata_german_title(title)
+            WIKIDATA_GERMAN_TITLE_CACHE[imdb_id] = normalized
+            return normalized
+    except Exception as exc:
+        if debug:
+            print(f"  Wikidata German title lookup failed for {imdb_id}: {exc}")
+
+    WIKIDATA_GERMAN_TITLE_CACHE[imdb_id] = None
+    return None
+
+def apply_preferred_output_title(movie_info, folder_name, metadata_titles=None, clue_terms=None, debug=False):
+    """Prefer strong local German titles and fall back to Wikidata German titles by IMDb ID."""
+    if not movie_info:
+        return movie_info
+
+    localized = dict(movie_info)
+    local_terms = [folder_name] + list(metadata_titles or []) + list(clue_terms or [])
+    preferred_local = choose_preferred_local_title(
+        localized,
+        local_terms,
+        matched_search_term=folder_name
+    )
+    if preferred_local:
+        local_score = max(
+            title_match_score(preferred_local, localized.get('title') or ''),
+            title_match_score(preferred_local, localized.get('title_en') or '')
+        )
+        if local_score > 0:
+            localized['title'] = preferred_local
+            localized['title_de'] = preferred_local
+
+    german_title = fetch_wikidata_german_title(localized.get('imdb_id'), debug=debug)
+    if german_title:
+        localized['title'] = german_title
+        localized['title_de'] = german_title
+        if debug:
+            print(f"  Using German title from Wikidata: {german_title}")
+
+    return localized
 
 def fetch_imdb_details_from_search(imdb_id, search_terms, debug=False):
     """Recover IMDb details from localized search results when the title page blocks direct fetches."""
@@ -1745,6 +1830,16 @@ def classify_video_files(folder_path, video_files):
 
 def has_dvd_structure(folder_path):
     """Detect a classic DVD folder that should keep its VIDEO_TS contents untouched."""
+    dvd_marker_pattern = re.compile(r'.+\.(?:ifo|vob|bup)$', flags=re.IGNORECASE)
+
+    try:
+        for item in os.listdir(folder_path):
+            item_path = os.path.join(folder_path, item)
+            if os.path.isfile(item_path) and dvd_marker_pattern.match(item):
+                return True
+    except OSError:
+        return False
+
     video_ts_path = os.path.join(folder_path, 'VIDEO_TS')
     if not os.path.isdir(video_ts_path):
         return False
@@ -1768,6 +1863,30 @@ def has_iso_image(folder_path):
     except OSError:
         return False
     return False
+
+def has_nested_dvd_structure(folder_path):
+    """Detect DVD structures inside nested subfolders below the movie root."""
+    try:
+        for root, dirs, files in os.walk(folder_path):
+            dirs[:] = [d for d in dirs if not d.startswith('.') and not d.startswith('@')]
+            if os.path.abspath(root) == os.path.abspath(folder_path):
+                continue
+
+            if os.path.basename(root).upper() == 'VIDEO_TS':
+                for item in files:
+                    upper_name = item.upper()
+                    if upper_name.endswith('.IFO') or upper_name.endswith('.VOB') or upper_name.endswith('.BUP'):
+                        return True
+    except OSError:
+        return False
+    return False
+
+def detect_special_skip_reason(folder_path, clue_years=None):
+    """Return a clearer skip reason for known unsafe folder shapes."""
+    years = sorted(set(clue_years or []))
+    if has_nested_dvd_structure(folder_path) and len(years) >= 2:
+        return "Likely multi-movie DVD set with multiple years; skipping single-title rename"
+    return None
 
 def create_folder_name(movie_info):
     """Create Jellyfin-compliant folder name from lookup title and year."""
@@ -1837,6 +1956,15 @@ def rename_movie_folder(folder_name, base_path, debug=False):
     clue_terms = collect_local_search_clues(folder_path, folder_name, debug=debug)
     metadata_titles = collect_metadata_title_clues(folder_path, debug=debug)
     metadata_imdb_ids = collect_imdb_id_clues(folder_path, debug=debug)
+    special_skip_reason = detect_special_skip_reason(folder_path, clue_years=clue_years)
+    if special_skip_reason:
+        if debug:
+            print(f"  Skipping: {special_skip_reason}")
+        return {
+            'status': 'skipped',
+            'folder': folder_name,
+            'reason': special_skip_reason,
+        }
     
     # Search IMDB
     if len(metadata_imdb_ids) == 1:
@@ -1867,6 +1995,14 @@ def rename_movie_folder(folder_name, base_path, debug=False):
         if debug:
             print(f"  Skipping: Could not find match on IMDB")
         return False
+
+    movie_info = apply_preferred_output_title(
+        movie_info,
+        folder_name,
+        metadata_titles=metadata_titles,
+        clue_terms=clue_terms,
+        debug=debug
+    )
     
     # Create new folder name strictly from lookup title.
     new_folder_name = create_folder_name(movie_info)
@@ -1910,6 +2046,7 @@ def rename_movie_folder(folder_name, base_path, debug=False):
         print("  Detected ISO image; folder will be renamed but ISO files kept unchanged")
 
     result_info = {
+        'status': 'success',
         'original_folder': folder_name,
         'new_folder': new_folder_name,
         'has_videos': len(main_video_files) > 0 or dvd_structure or iso_image,
@@ -2121,7 +2258,13 @@ def main():
         print(f"\n[{i}/{len(movies_to_process)}]", end="")
         
         result = rename_movie_folder(movie_folder, base_path, debug=args.debug)
-        if result is False:
+        if isinstance(result, dict) and result.get('status') == 'skipped':
+            skipped_count += 1
+            skipped_movies.append({
+                'folder': result.get('folder', movie_folder),
+                'reason': result.get('reason', 'No confident IMDB match found from folder, file, and metadata clues')
+            })
+        elif result is False:
             # IMDB lookup failed
             skipped_count += 1
             skipped_movies.append({
