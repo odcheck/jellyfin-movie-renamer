@@ -277,6 +277,26 @@ class MovieRenamerTests(unittest.TestCase):
         self.assertEqual(localized['title'], 'Die Vorahnung')
         self.assertEqual(localized['title_de'], 'Die Vorahnung')
 
+    def test_apply_preferred_output_title_keeps_matching_metadata_title(self):
+        movie_info = {
+            'title': 'Elsewhere',
+            'title_en': 'Elsewhere',
+            'year': '2009',
+            'imdb_id': 'tt0874271',
+        }
+
+        with mock.patch.object(self.mod, 'fetch_wikidata_german_title', return_value='Small Town Secret'):
+            localized = self.mod.apply_preferred_output_title(
+                movie_info,
+                'elsewhere.(2009)',
+                metadata_titles=['Elsewhere', 'Small Town Secret'],
+                clue_terms=[],
+                debug=False
+            )
+
+        self.assertEqual(localized['title'], 'Elsewhere')
+        self.assertEqual(localized['title_de'], 'Elsewhere')
+
     def test_build_raw_search_variants_keeps_dash_prefix(self):
         variants = self.mod.build_raw_search_variants(
             'Duck Tales - Jäger des verlorenen Schatzes'

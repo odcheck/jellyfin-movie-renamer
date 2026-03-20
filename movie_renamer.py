@@ -914,22 +914,42 @@ def apply_preferred_output_title(movie_info, folder_name, metadata_titles=None, 
         return movie_info
 
     localized = dict(movie_info)
-    local_terms = [folder_name] + list(metadata_titles or []) + list(clue_terms or [])
-    preferred_local = choose_preferred_local_title(
-        localized,
-        local_terms,
-        matched_search_term=folder_name
-    )
-    if preferred_local:
-        local_score = max(
-            title_match_score(preferred_local, localized.get('title') or ''),
-            title_match_score(preferred_local, localized.get('title_en') or '')
-        )
-        if local_score > 0:
-            localized['title'] = preferred_local
-            localized['title_de'] = preferred_local
+    metadata_titles = list(metadata_titles or [])
+    clue_terms = list(clue_terms or [])
+    local_terms = [folder_name] + metadata_titles + clue_terms
+    metadata_locked = False
 
-    german_title = fetch_wikidata_german_title(localized.get('imdb_id'), debug=debug)
+    preferred_metadata = choose_preferred_local_title(
+        localized,
+        metadata_titles,
+        matched_search_term=None
+    ) if metadata_titles else None
+    if preferred_metadata:
+        metadata_score = max(
+            title_match_score(preferred_metadata, localized.get('title') or ''),
+            title_match_score(preferred_metadata, localized.get('title_en') or '')
+        )
+        if metadata_score > 0:
+            localized['title'] = preferred_metadata
+            localized['title_de'] = preferred_metadata
+            metadata_locked = True
+
+    if not metadata_locked:
+        preferred_local = choose_preferred_local_title(
+            localized,
+            local_terms,
+            matched_search_term=folder_name
+        )
+        if preferred_local:
+            local_score = max(
+                title_match_score(preferred_local, localized.get('title') or ''),
+                title_match_score(preferred_local, localized.get('title_en') or '')
+            )
+            if local_score > 0:
+                localized['title'] = preferred_local
+                localized['title_de'] = preferred_local
+
+    german_title = None if metadata_locked else fetch_wikidata_german_title(localized.get('imdb_id'), debug=debug)
     if german_title:
         localized['title'] = german_title
         localized['title_de'] = german_title
