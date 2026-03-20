@@ -67,6 +67,31 @@ VIDEO_EXTENSIONS = {
     '.mpg', '.mpeg'
 }
 TEXT_METADATA_EXTENSIONS = {'.nfo', '.txt', '.xml'}
+MIN_MAIN_VIDEO_BYTES = 100 * 1024 * 1024
+EXTRA_TYPE_ALIASES = {
+    'trailer': 'trailer',
+    'trailers': 'trailer',
+    'sample': 'sample',
+    'samples': 'sample',
+    'scene': 'scene',
+    'scenes': 'scene',
+    'clip': 'clip',
+    'clips': 'clip',
+    'interview': 'interview',
+    'interviews': 'interview',
+    'behindthescenes': 'behindthescenes',
+    'behindthescene': 'behindthescenes',
+    'deleted': 'deleted',
+    'deletedscene': 'deletedscene',
+    'deletedscenes': 'deletedscene',
+    'featurette': 'featurette',
+    'featurettes': 'featurette',
+    'short': 'short',
+    'shorts': 'short',
+    'other': 'other',
+    'extras': 'extra',
+    'extra': 'extra',
+}
 
 def derive_related_output_path(base_file, suffix):
     """Create sibling output file path based on the configured base file."""
@@ -491,6 +516,21 @@ def title_match_score(search_title, candidate_title):
             if all(difflib.SequenceMatcher(None, s, c).ratio() >= 0.85 for s, c in zip(search_list, candidate_list)):
                 return 180
         return 0
+
+    if len(candidate_words) == 1 and len(search_list) >= 3:
+        anchor = candidate_list[0]
+        if search_list[0] == anchor and len(anchor) >= 7 and len(search_list[1]) > 2:
+            return 135
+
+    if len(search_list) == len(candidate_list) and len(search_list) >= 3:
+        positional_ratios = [
+            difflib.SequenceMatcher(None, search_word, candidate_word).ratio()
+            for search_word, candidate_word in zip(search_list, candidate_list)
+        ]
+        if all(ratio >= 0.85 for ratio in positional_ratios):
+            return 185
+        if sum(1 for ratio in positional_ratios if ratio >= 0.85) >= len(search_list) - 1:
+            return 0
 
     overlap = search_words & candidate_words
     if search_words.issubset(candidate_words):
@@ -1397,6 +1437,70 @@ def get_video_files(folder_path):
         
     return video_files
 
+def normalize_extra_marker(value):
+    """Normalize folder or filename fragments to Jellyfin extra-type tokens."""
+    normalized = transliterate_german((value or '').lower())
+    normalized = re.sub(r'[^a-z0-9]+', '', normalized)
+    return EXTRA_TYPE_ALIASES.get(normalized)
+
+def detect_extra_type(rel_path, filename):
+    """Detect whether a video file should be treated as a Jellyfin extra."""
+    path_parts = [part for part in (rel_path or '').split(os.sep) if part and part != '.']
+    for part in reversed(path_parts):
+        extra_type = normalize_extra_marker(part)
+        if extra_type:
+            return extra_type
+
+    stem = os.path.splitext(filename)[0]
+    lowered_stem = transliterate_german(stem.lower())
+    pattern_map = [
+        ('behindthescenes', r'(?:(?:^|[\s._-])behind[\s._-]*the[\s._-]*scenes(?:$|[\s._-]))'),
+        ('deletedscene', r'(?:(?:^|[\s._-])deleted[\s._-]*scenes?(?:$|[\s._-]))'),
+        ('featurette', r'(?:(?:^|[\s._-])featurettes?(?:$|[\s._-]))'),
+        ('interview', r'(?:(?:^|[\s._-])interviews?(?:$|[\s._-]))'),
+        ('trailer', r'(?:(?:^|[\s._-])trailer(?:$|[\s._-])| trailer$)'),
+        ('sample', r'(?:(?:^|[\s._-])sample(?:$|[\s._-])| sample$)'),
+        ('scene', r'(?:(?:^|[\s._-])scene(?:$|[\s._-]))'),
+        ('clip', r'(?:(?:^|[\s._-])clip(?:$|[\s._-]))'),
+        ('short', r'(?:(?:^|[\s._-])short(?:$|[\s._-]))'),
+        ('other', r'(?:(?:^|[\s._-])other(?:$|[\s._-]))'),
+        ('extra', r'(?:(?:^|[\s._-])extra(?:$|[\s._-])|(?:^|[\s._-])extras(?:$|[\s._-]))'),
+    ]
+    for extra_type, pattern in pattern_map:
+        if re.search(pattern, lowered_stem):
+            return extra_type
+    return None
+
+def classify_video_files(folder_path, video_files):
+    """Split discovered video files into main movie files and extras."""
+    main_files = []
+    extra_files = []
+    ignored_files = []
+
+    for rel_path, filename in video_files:
+        file_path = os.path.join(folder_path, rel_path, filename) if rel_path else os.path.join(folder_path, filename)
+        try:
+            file_size = os.path.getsize(file_path)
+        except OSError:
+            file_size = 0
+
+        extra_type = detect_extra_type(rel_path, filename)
+        file_info = {
+            'rel_path': rel_path,
+            'filename': filename,
+            'path': file_path,
+            'size': file_size,
+            'extra_type': extra_type,
+        }
+        if extra_type:
+            extra_files.append(file_info)
+        elif file_size < MIN_MAIN_VIDEO_BYTES:
+            ignored_files.append(file_info)
+        else:
+            main_files.append(file_info)
+
+    return main_files, extra_files, ignored_files
+
 def has_dvd_structure(folder_path):
     """Detect a classic DVD folder that should keep its VIDEO_TS contents untouched."""
     video_ts_path = os.path.join(folder_path, 'VIDEO_TS')
@@ -1453,12 +1557,24 @@ def extract_part_number(filename):
 def sort_video_files(video_files):
     """Sort by detected part number first (if available), then by path/name."""
     def key(item):
-        rel_path, filename = item
+        filename = item['filename'] if isinstance(item, dict) else item[1]
+        rel_path = item['rel_path'] if isinstance(item, dict) else item[0]
         part = extract_part_number(filename)
         has_part = 0 if part is not None else 1
         part_value = part if part is not None else 999
         return (has_part, part_value, rel_path.lower(), filename.lower())
     return sorted(video_files, key=key)
+
+def build_extra_video_name(base_name, extra_type, ext, used_names):
+    """Build a Jellyfin extra filename and avoid collisions if several extras share a type."""
+    suffix = f"-{extra_type}"
+    candidate = f"{base_name}{suffix}{ext.lower()}"
+    counter = 2
+    while candidate in used_names:
+        candidate = f"{base_name}{suffix}{counter}{ext.lower()}"
+        counter += 1
+    used_names.add(candidate)
+    return candidate
 
 def rename_movie_folder(folder_name, base_path, debug=False):
     """Process and rename a single movie folder"""
@@ -1518,23 +1634,43 @@ def rename_movie_folder(folder_name, base_path, debug=False):
     
     # Get video files (now returns list of (rel_path, filename) tuples)
     video_files = get_video_files(folder_path)
+    main_video_files, extra_video_files, ignored_video_files = classify_video_files(folder_path, video_files)
     dvd_structure = has_dvd_structure(folder_path)
     iso_image = has_iso_image(folder_path)
-    print(f"  Found {len(video_files)} video file(s)")
-    for rel_path, filename in video_files:
+    print(f"  Found {len(main_video_files) + len(extra_video_files)} usable video file(s)")
+    for file_info in main_video_files:
+        rel_path = file_info['rel_path']
+        filename = file_info['filename']
         if rel_path:
             print(f"    {rel_path}/{filename}")
         else:
             print(f"    {filename}")
-    if dvd_structure and not video_files:
+    for file_info in extra_video_files:
+        rel_path = file_info['rel_path']
+        filename = file_info['filename']
+        extra_type = file_info['extra_type']
+        if rel_path:
+            print(f"    {rel_path}/{filename} [{extra_type}]")
+        else:
+            print(f"    {filename} [{extra_type}]")
+    if ignored_video_files:
+        print(f"  Ignoring {len(ignored_video_files)} small video file(s) under 100 MB")
+        for file_info in ignored_video_files:
+            rel_path = file_info['rel_path']
+            filename = file_info['filename']
+            if rel_path:
+                print(f"    {rel_path}/{filename}")
+            else:
+                print(f"    {filename}")
+    if dvd_structure and not main_video_files and not extra_video_files:
         print("  Detected DVD VIDEO_TS structure; folder will be renamed but DVD files kept unchanged")
-    if iso_image and not video_files:
+    if iso_image and not main_video_files and not extra_video_files:
         print("  Detected ISO image; folder will be renamed but ISO files kept unchanged")
 
     result_info = {
         'original_folder': folder_name,
         'new_folder': new_folder_name,
-        'has_videos': len(video_files) > 0 or dvd_structure or iso_image,
+        'has_videos': len(main_video_files) > 0 or dvd_structure or iso_image,
         'dvd_structure': dvd_structure,
         'iso_image': iso_image,
         'video_moves': []
@@ -1545,22 +1681,39 @@ def rename_movie_folder(folder_name, base_path, debug=False):
         print("  [DRY RUN] Would rename folder and video files")
         print(f"    Folder: {folder_name} -> {new_folder_name}")
         
-        all_video_files = sort_video_files(video_files)
-        
-        for idx, (rel_path, filename) in enumerate(all_video_files):
+        all_video_files = sort_video_files(main_video_files)
+        used_names = set()
+
+        for idx, file_info in enumerate(all_video_files):
+            rel_path = file_info['rel_path']
+            filename = file_info['filename']
             _, ext = os.path.splitext(filename)
             base_name = create_video_base_name(new_folder_name, movie_info)
             cd_suffix = f"-cd{idx + 1}" if len(all_video_files) > 1 else ""
             new_video_name = f"{base_name}{cd_suffix}{ext.lower()}"
+            used_names.add(new_video_name)
             source_display = f"{rel_path}/{filename}" if rel_path else filename
             result_info['video_moves'].append((source_display, new_video_name))
             if rel_path:
                 print(f"    Move and rename: {rel_path}/{filename} -> {new_video_name}")
             else:
                 print(f"    Rename: {filename} -> {new_video_name}")
-        if dvd_structure and not all_video_files:
+
+        for file_info in sort_video_files(extra_video_files):
+            rel_path = file_info['rel_path']
+            filename = file_info['filename']
+            _, ext = os.path.splitext(filename)
+            base_name = create_video_base_name(new_folder_name, movie_info)
+            new_video_name = build_extra_video_name(base_name, file_info['extra_type'], ext, used_names)
+            source_display = f"{rel_path}/{filename}" if rel_path else filename
+            result_info['video_moves'].append((source_display, new_video_name))
+            if rel_path:
+                print(f"    Move and rename extra: {rel_path}/{filename} -> {new_video_name}")
+            else:
+                print(f"    Rename extra: {filename} -> {new_video_name}")
+        if dvd_structure and not all_video_files and not extra_video_files:
             print("    DVD structure preserved: VIDEO_TS contents stay unchanged")
-        if iso_image and not all_video_files:
+        if iso_image and not all_video_files and not extra_video_files:
             print("    ISO image preserved: disc image stays unchanged")
     else:
         try:
@@ -1576,14 +1729,19 @@ def rename_movie_folder(folder_name, base_path, debug=False):
             else:
                 print("  Folder already matches target naming")
 
-            all_video_files = sort_video_files(video_files)
+            all_video_files = sort_video_files(main_video_files)
+            all_extra_files = sort_video_files(extra_video_files)
             subfolders_to_remove = set()
+            used_names = set()
             
-            for idx, (rel_path, filename) in enumerate(all_video_files):
+            for idx, file_info in enumerate(all_video_files):
+                rel_path = file_info['rel_path']
+                filename = file_info['filename']
                 _, ext = os.path.splitext(filename)
                 base_name = create_video_base_name(new_folder_name, movie_info)
                 cd_suffix = f"-cd{idx + 1}" if len(all_video_files) > 1 else ""
                 new_video_name = f"{base_name}{cd_suffix}{ext.lower()}"
+                used_names.add(new_video_name)
                 
                 # Source path
                 if rel_path:
@@ -1608,9 +1766,37 @@ def rename_movie_folder(folder_name, base_path, debug=False):
                     result_info['video_moves'].append((source_display, new_video_name))
                     print(f"    Renamed video: {filename} -> {new_video_name}")
 
-            if dvd_structure and not all_video_files:
+            for file_info in all_extra_files:
+                rel_path = file_info['rel_path']
+                filename = file_info['filename']
+                _, ext = os.path.splitext(filename)
+                base_name = create_video_base_name(new_folder_name, movie_info)
+                new_video_name = build_extra_video_name(base_name, file_info['extra_type'], ext, used_names)
+
+                if rel_path:
+                    old_video_path = os.path.join(current_folder_path, rel_path, filename)
+                    rel_cursor = rel_path
+                    while rel_cursor and rel_cursor != '.':
+                        subfolders_to_remove.add(os.path.join(current_folder_path, rel_cursor))
+                        next_cursor = os.path.dirname(rel_cursor)
+                        rel_cursor = '' if next_cursor == rel_cursor else next_cursor
+                else:
+                    old_video_path = os.path.join(current_folder_path, filename)
+
+                new_video_path = os.path.join(current_folder_path, new_video_name)
+                if os.path.exists(old_video_path):
+                    if os.path.abspath(old_video_path) == os.path.abspath(new_video_path):
+                        source_display = f"{rel_path}/{filename}" if rel_path else filename
+                        result_info['video_moves'].append((source_display, new_video_name))
+                        continue
+                    shutil.move(old_video_path, new_video_path)
+                    source_display = f"{rel_path}/{filename}" if rel_path else filename
+                    result_info['video_moves'].append((source_display, new_video_name))
+                    print(f"    Renamed extra: {filename} -> {new_video_name}")
+
+            if dvd_structure and not all_video_files and not all_extra_files:
                 print("    Preserved DVD structure inside VIDEO_TS")
-            if iso_image and not all_video_files:
+            if iso_image and not all_video_files and not all_extra_files:
                 print("    Preserved ISO image inside movie folder")
             
             # Remove empty subfolders

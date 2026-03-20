@@ -67,6 +67,20 @@ class MovieRenamerTests(unittest.TestCase):
             0
         )
 
+    def test_same_tail_different_head_is_rejected(self):
+        self.assertEqual(
+            self.mod.title_match_score('Wolverine Weg des Kriegers', 'Anuk Der Weg des Kriegers'),
+            0
+        )
+        self.assertGreater(
+            self.mod.title_match_score('Wolverine Weg des Kriegers', 'The Wolverine'),
+            0
+        )
+        self.assertEqual(
+            self.mod.title_match_score('Reality Xl Realitaet Ist Ein Traum', 'Reality'),
+            0
+        )
+
     def test_feature_filter_rejects_games_and_podcasts(self):
         from bs4 import BeautifulSoup
 
@@ -178,6 +192,19 @@ class MovieRenamerTests(unittest.TestCase):
             matched_search_term='Lautlos im Weltraum'
         )
         self.assertEqual(chosen, 'Lautlos im Weltraum')
+
+    def test_detect_extra_type_from_folder_and_filename(self):
+        self.assertEqual(
+            self.mod.detect_extra_type('Sample', 'coincidence-life-720p-sample.mkv'),
+            'sample'
+        )
+        self.assertEqual(
+            self.mod.detect_extra_type('', 'movie-trailer.mkv'),
+            'trailer'
+        )
+        self.assertIsNone(
+            self.mod.detect_extra_type('', 'Wolverine Weg des Kriegers.avi')
+        )
 
 
 if __name__ == '__main__':
