@@ -3,6 +3,7 @@ import os
 import sys
 import tempfile
 import unittest
+from unittest import mock
 
 
 def load_module():
@@ -170,6 +171,31 @@ class MovieRenamerTests(unittest.TestCase):
             self.assertTrue(self.mod.has_dvd_structure(temp_dir))
             self.assertTrue(self.mod.has_iso_image(temp_dir))
 
+    def test_dvd_detection_allows_flat_video_ts_files_in_root(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            with open(os.path.join(temp_dir, 'VIDEO_TS.IFO'), 'w', encoding='utf-8') as handle:
+                handle.write('dvd marker')
+            with open(os.path.join(temp_dir, 'VTS_01_1.VOB'), 'w', encoding='utf-8') as handle:
+                handle.write('dvd marker')
+
+            self.assertTrue(self.mod.has_dvd_structure(temp_dir))
+
+    def test_detect_special_skip_reason_for_nested_multi_movie_dvd(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            nested = os.path.join(temp_dir, 'Ingmar.Bergman.Special.DVD', 'VIDEO_TS')
+            os.makedirs(nested, exist_ok=True)
+            with open(os.path.join(nested, 'VIDEO_TS.IFO'), 'w', encoding='utf-8') as handle:
+                handle.write('dvd marker')
+
+            reason = self.mod.detect_special_skip_reason(
+                temp_dir,
+                clue_years=['1960', '1963']
+            )
+            self.assertEqual(
+                reason,
+                'Likely multi-movie DVD set with multiple years; skipping single-title rename'
+            )
+
     def test_suggestion_video_items_can_be_allowed_for_metadata_id_recovery(self):
         data = {
             'd': [
@@ -230,6 +256,26 @@ class MovieRenamerTests(unittest.TestCase):
 
             self.assertIn('2013', years)
             self.assertTrue(any('Die Unfassbaren' in clue for clue in clues))
+
+    def test_apply_preferred_output_title_uses_wikidata_german_title(self):
+        movie_info = {
+            'title': 'Premonition',
+            'title_en': 'Premonition',
+            'year': '2007',
+            'imdb_id': 'tt0477071',
+        }
+
+        with mock.patch.object(self.mod, 'fetch_wikidata_german_title', return_value='Die Vorahnung'):
+            localized = self.mod.apply_preferred_output_title(
+                movie_info,
+                'Premonition',
+                metadata_titles=[],
+                clue_terms=[],
+                debug=False
+            )
+
+        self.assertEqual(localized['title'], 'Die Vorahnung')
+        self.assertEqual(localized['title_de'], 'Die Vorahnung')
 
     def test_build_raw_search_variants_keeps_dash_prefix(self):
         variants = self.mod.build_raw_search_variants(
