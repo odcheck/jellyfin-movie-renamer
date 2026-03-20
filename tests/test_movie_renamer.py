@@ -81,6 +81,12 @@ class MovieRenamerTests(unittest.TestCase):
             0
         )
 
+    def test_compound_franchise_tokens_still_match(self):
+        self.assertGreater(
+            self.mod.title_match_score('Duck Tales', 'DuckTales the Movie: Treasure of the Lost Lamp'),
+            0
+        )
+
     def test_feature_filter_rejects_games_and_podcasts(self):
         from bs4 import BeautifulSoup
 
@@ -224,6 +230,18 @@ class MovieRenamerTests(unittest.TestCase):
 
             self.assertIn('2013', years)
             self.assertTrue(any('Die Unfassbaren' in clue for clue in clues))
+
+    def test_build_raw_search_variants_keeps_dash_prefix(self):
+        variants = self.mod.build_raw_search_variants(
+            'Duck Tales - Jäger des verlorenen Schatzes'
+        )
+        self.assertIn('Duck Tales', variants)
+
+    def test_clean_search_term_splits_glued_title_parts(self):
+        self.assertEqual(
+            self.mod.clean_search_term('Die_JungfrauenquelleDas_SchweigenI (1960)'),
+            'Die Jungfrauenquelle Das Schweigen I'
+        )
 
 
 if __name__ == '__main__':
