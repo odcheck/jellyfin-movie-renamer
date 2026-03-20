@@ -206,6 +206,25 @@ class MovieRenamerTests(unittest.TestCase):
             self.mod.detect_extra_type('', 'Wolverine Weg des Kriegers.avi')
         )
 
+    def test_franchise_number_helpers(self):
+        self.assertEqual(self.mod.extract_franchise_number('Die Unendliche Geschichte 2'), 2)
+        self.assertEqual(self.mod.extract_franchise_number('Drachenzaehmen 1'), 1)
+        self.assertEqual(self.mod.candidate_franchise_number('The NeverEnding Story II: The Next Chapter'), 2)
+        self.assertEqual(self.mod.candidate_franchise_number('The NeverEnding Story'), None)
+
+    def test_collects_year_and_title_clues_from_subfolder_names(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            subdir = os.path.join(temp_dir, 'Uploader.Presents-Die.Unfassbaren.2013.German.EXTE')
+            os.makedirs(subdir, exist_ok=True)
+            with open(os.path.join(subdir, 'movie.avi'), 'w', encoding='utf-8') as handle:
+                handle.write('placeholder')
+
+            years = self.mod.collect_local_year_clues(temp_dir, debug=False)
+            clues = self.mod.collect_local_search_clues(temp_dir, 'die unfassbaren', debug=False)
+
+            self.assertIn('2013', years)
+            self.assertTrue(any('Die Unfassbaren' in clue for clue in clues))
+
 
 if __name__ == '__main__':
     unittest.main()

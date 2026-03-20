@@ -154,6 +154,50 @@ def extract_year_candidates(text):
         return []
     return re.findall(r'\b((?:19|20)\d{2})\b', text)
 
+def extract_franchise_number(text):
+    """Extract a sequel/franchise number from a search string if present."""
+    if not text:
+        return None
+    cleaned = transliterate_german(text.lower())
+    for pattern, value in (
+        (r'\bpart\s*([1-9]|i{1,3}|iv|v|vi{0,3}|ix|x)\b', None),
+        (r'\bteil\s*([1-9]|i{1,3}|iv|v|vi{0,3}|ix|x)\b', None),
+        (r'\bchapter\s*([1-9]|i{1,3}|iv|v|vi{0,3}|ix|x)\b', None),
+        (r'\b([1-9])\b', None),
+        (r'\b(iii|ii|iv|ix|viii|vii|vi|v|x)\b', None),
+    ):
+        match = re.search(pattern, cleaned)
+        if not match:
+            continue
+        token = match.group(1)
+        roman_map = {'i': 1, 'ii': 2, 'iii': 3, 'iv': 4, 'v': 5, 'vi': 6, 'vii': 7, 'viii': 8, 'ix': 9, 'x': 10}
+        if token.isdigit():
+            return int(token)
+        return roman_map.get(token)
+    return None
+
+def candidate_franchise_number(title):
+    """Extract a sequel/franchise number from a candidate title when obvious."""
+    if not title:
+        return None
+    cleaned = transliterate_german(title.lower())
+    patterns = [
+        r'\bpart\s*([1-9]|i{1,3}|iv|v|vi{0,3}|ix|x)\b',
+        r'\bchapter\s*([1-9]|i{1,3}|iv|v|vi{0,3}|ix|x)\b',
+        r'\b([1-9])\b',
+        r'\b(iii|ii|iv|ix|viii|vii|vi|v|x)\b',
+    ]
+    roman_map = {'i': 1, 'ii': 2, 'iii': 3, 'iv': 4, 'v': 5, 'vi': 6, 'vii': 7, 'viii': 8, 'ix': 9, 'x': 10}
+    for pattern in patterns:
+        match = re.search(pattern, cleaned)
+        if not match:
+            continue
+        token = match.group(1)
+        if token.isdigit():
+            return int(token)
+        return roman_map.get(token)
+    return None
+
 def clean_search_term(folder_name):
     """Clean folder name for IMDB search"""
     clean_name = folder_name
@@ -205,6 +249,10 @@ def collect_local_year_clues(folder_path, debug=False):
     try:
         for root, dirs, files in os.walk(folder_path):
             dirs[:] = [d for d in dirs if not d.startswith('.') and not d.startswith('@')]
+            rel_root = os.path.relpath(root, folder_path)
+            if rel_root and rel_root != '.':
+                for year in extract_year_candidates(rel_root):
+                    clue_years.append(year)
 
             for file_name in files:
                 file_path = os.path.join(root, file_name)
@@ -386,6 +434,11 @@ def collect_local_search_clues(folder_path, original_folder_name, debug=False):
     try:
         for root, dirs, files in os.walk(folder_path):
             dirs[:] = [d for d in dirs if not d.startswith('.') and not d.startswith('@')]
+            rel_root = os.path.relpath(root, folder_path)
+            if rel_root and rel_root != '.':
+                cleaned_root = clean_search_term(rel_root)
+                if cleaned_root and not ignored_stem_pattern.match(cleaned_root.lower()):
+                    clue_terms.append(cleaned_root)
 
             for file_name in files:
                 file_path = os.path.join(root, file_name)
@@ -900,7 +953,8 @@ def extract_imdb_suggestion_candidates(search_term, data, prefer_search_title=Fa
             'title_de': display_title,
             'title_en': english_title,
             'year': str(item.get('y')),
-            'imdb_id': item.get('id')
+            'imdb_id': item.get('id'),
+            'imdb_rank': item.get('rank', 10**9)
         })
     return candidates
 
@@ -1024,8 +1078,11 @@ def search_imdb(
     """Search IMDB for movie and return result with year and ID, or None if ambiguous"""
     try:
         search_base = clean_search_term(original_folder_name)
+        target_year = extract_year_from_folder_name(folder_name_for_year)
+        requested_number = extract_franchise_number(search_base)
+        clue_year_set = set(clue_years or [])
         title_candidates = []
-        for title in (authoritative_titles or []) + [search_base]:
+        for title in [search_base] + (authoritative_titles or []):
             if title and title not in title_candidates:
                 title_candidates.append(title)
 
@@ -1076,6 +1133,35 @@ def search_imdb(
         results_by_id = {}
         candidate_scores = {}
 
+        def fallback_acceptance_score(details, search_term, suggestion_index):
+            words = normalize_title_for_match(search_term)
+            candidate_number = candidate_franchise_number(details.get('title_en') or details.get('title'))
+            score = 0
+
+            if target_year and details['year'] == target_year and len(words) >= 2 and search_term == search_base:
+                score = max(score, 160)
+            elif clue_year_set and details['year'] in clue_year_set and len(words) >= 2:
+                score = max(score, 135)
+
+            if requested_number is not None:
+                if requested_number == 1:
+                    if candidate_number is None and search_term == search_base:
+                        base_score = 105 - (suggestion_index * 5)
+                        title_text = details.get('title_en') or details.get('title') or ''
+                        try:
+                            base_score += max(0, 2025 - int(details['year']))
+                        except Exception:
+                            pass
+                        if ':' in title_text:
+                            base_score -= 20
+                        if re.search(r'\b(homecoming|hidden world|next chapter|chapter)\b', title_text, flags=re.IGNORECASE):
+                            base_score -= 25
+                        score = max(score, base_score)
+                elif candidate_number == requested_number:
+                    score = max(score, 125 - (suggestion_index * 5))
+
+            return score
+
         for search_index, search_term in enumerate(search_terms):
             if not search_term.strip():
                 continue
@@ -1100,28 +1186,34 @@ def search_imdb(
                 debug=debug,
                 prefer_search_title=False
             )
-            for details in suggestion_candidates[:8]:
+            for suggestion_index, details in enumerate(suggestion_candidates[:8]):
                 imdb_id = details['imdb_id']
                 if imdb_id in results_by_id:
                     details = results_by_id[imdb_id]
                 else:
                     title_score = candidate_match_score(details, title_candidates, base_title=search_base)
                     if title_score <= 0:
+                        title_score = fallback_acceptance_score(details, search_term, suggestion_index)
+                    if title_score <= 0:
                         if debug:
                             print(f"  Ignoring loosely related result: {details['title']} ({details['year']})")
                         continue
                     results_by_id[imdb_id] = details
                 title_score = candidate_match_score(details, title_candidates, base_title=search_base)
+                if title_score <= 0:
+                    title_score = fallback_acceptance_score(details, search_term, suggestion_index)
                 score = candidate_scores.setdefault(imdb_id, {
                     'score': 0,
                     'hits': 0,
                     'clue_hits': 0,
                     'year_distance': None,
-                    'title_score': 0
+                    'title_score': 0,
+                    'rank_score': -(details.get('imdb_rank', 10**9))
                 })
                 score['score'] += term_weight + title_score
                 score['hits'] += 1
                 score['title_score'] = max(score['title_score'], title_score)
+                score['rank_score'] = max(score['rank_score'], -(details.get('imdb_rank', 10**9)))
                 if is_clue_term:
                     score['clue_hits'] += 1
                 if clue_years:
@@ -1192,16 +1284,20 @@ def search_imdb(
                             continue
                         results_by_id[imdb_id] = details
                     title_score = candidate_match_score(details, title_candidates, base_title=search_base)
+                    if title_score <= 0:
+                        title_score = fallback_acceptance_score(details, search_term, i)
                     score = candidate_scores.setdefault(imdb_id, {
                         'score': 0,
                         'hits': 0,
                         'clue_hits': 0,
                         'year_distance': None,
-                        'title_score': 0
+                        'title_score': 0,
+                        'rank_score': -(details.get('imdb_rank', 10**9))
                     })
                     score['score'] += term_weight + title_score
                     score['hits'] += 1
                     score['title_score'] = max(score['title_score'], title_score)
+                    score['rank_score'] = max(score['rank_score'], -(details.get('imdb_rank', 10**9)))
                     if is_clue_term:
                         score['clue_hits'] += 1
                     if clue_years:
@@ -1274,11 +1370,39 @@ def search_imdb(
             return None
 
         years = set(r['year'] for r in unique_results)
-        target_year = extract_year_from_folder_name(folder_name_for_year)
         clue_year_matches = []
         if clue_years and not target_year:
             clue_year_set = set(clue_years)
             clue_year_matches = [result for result in unique_results if result['year'] in clue_year_set]
+
+        if target_year and not any(result['year'] == target_year for result in unique_results):
+            if debug:
+                print(
+                    f"  No IMDB result matches the year in folder name ({target_year}). Skipping."
+                )
+            return None
+
+        if target_year and len(search_base.split()) >= 3:
+            year_matches = [result for result in unique_results if result['year'] == target_year]
+            if len(year_matches) == 1:
+                result = year_matches[0]
+                if debug:
+                    print(
+                        f"  Selected unique year-matching IMDB result despite title translation: "
+                        f"{result['title']} ({result['year']})"
+                    )
+                return result
+
+        if clue_year_matches and len(search_base.split()) >= 2:
+            exact_clue_matches = [result for result in unique_results if result['year'] in clue_year_set]
+            if len(exact_clue_matches) == 1:
+                result = exact_clue_matches[0]
+                if debug:
+                    print(
+                        f"  Selected unique clue-year IMDB result: "
+                        f"{result['title']} ({result['year']})"
+                    )
+                return result
 
         if len(unique_results) > 1:
             if target_year:
@@ -1303,6 +1427,7 @@ def search_imdb(
                     candidate_scores.get(result['imdb_id'], {}).get('clue_hits', 0),
                     candidate_scores.get(result['imdb_id'], {}).get('score', 0),
                     candidate_scores.get(result['imdb_id'], {}).get('hits', 0),
+                    candidate_scores.get(result['imdb_id'], {}).get('rank_score', -(10**9)),
                     -(
                         candidate_scores.get(result['imdb_id'], {}).get('year_distance', 999)
                         if candidate_scores.get(result['imdb_id'], {}).get('year_distance', None) is not None
@@ -1320,6 +1445,7 @@ def search_imdb(
                     candidate_scores.get(result['imdb_id'], {}).get('clue_hits', 0),
                     candidate_scores.get(result['imdb_id'], {}).get('score', 0),
                     candidate_scores.get(result['imdb_id'], {}).get('hits', 0),
+                    candidate_scores.get(result['imdb_id'], {}).get('rank_score', -(10**9)),
                     (
                         candidate_scores.get(result['imdb_id'], {}).get('year_distance', 999)
                         if candidate_scores.get(result['imdb_id'], {}).get('year_distance', None) is not None
@@ -1330,6 +1456,7 @@ def search_imdb(
                     best_metrics.get('clue_hits', 0),
                     best_metrics.get('score', 0),
                     best_metrics.get('hits', 0),
+                    best_metrics.get('rank_score', -(10**9)),
                     best_metrics.get('year_distance', 999)
                     if best_metrics.get('year_distance', None) is not None
                     else 999
