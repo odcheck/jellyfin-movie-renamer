@@ -11,6 +11,9 @@ Rename movie folders and movie files into a Jellyfin-friendly format using IMDb 
 - Renames multipart movie files to:
   - `Movie_Name (year) [imdbid-ttXXXXXX]-cd1.ext`
   - `Movie_Name (year) [imdbid-ttXXXXXX]-cd2.ext`
+- Renames extras to Jellyfin-style suffixes, for example:
+  - `Movie_Name (year) [imdbid-ttXXXXXX]-sample.ext`
+  - `Movie_Name (year) [imdbid-ttXXXXXX]-trailer.ext`
 
 ## Current Behavior
 
@@ -29,6 +32,8 @@ Rename movie folders and movie files into a Jellyfin-friendly format using IMDb 
 - Treats `.iso` files like DVDs:
   - rename folder
   - keep ISO file unchanged
+- Detects extras such as trailers, samples, clips, interviews, deleted scenes, featurettes, and other Jellyfin-supported extras
+- Ignores tiny main-video candidates under `100 MB`
 - Verifies real video files instead of trusting file extensions alone
 - Skips ambiguous matches instead of forcing bad renames
 
@@ -234,6 +239,8 @@ If a movie folder contains:
 - one video file: it is renamed
 - multiple video files: they are renamed as multipart files
 - a subfolder with video files: they are moved to the movie root and renamed
+- extras such as samples or trailers: they are renamed with Jellyfin extra suffixes instead of multipart `-cdN`
+- tiny files under `100 MB`: ignored unless recognized as extras
 
 Example:
 
