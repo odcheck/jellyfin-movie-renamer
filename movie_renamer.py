@@ -15,7 +15,7 @@ import json
 import subprocess
 import difflib
 from bs4 import BeautifulSoup
-from urllib.parse import quote_plus
+from urllib.parse import quote, quote_plus
 import shutil
 
 HOME_DIR = os.path.expanduser("~")
@@ -133,6 +133,10 @@ def clean_search_term(folder_name):
     """Clean folder name for IMDB search"""
     clean_name = folder_name
 
+    # Strip trailing scene-release group suffixes while the original dash
+    # structure is still intact, e.g. "- GMA - pij" or "-EPiC - Le".
+    clean_name = re.sub(r'(?:\s*-\s*[A-Za-z]{2,5}){1,3}\s*$', ' ', clean_name)
+
     # Normalize separators first so release-tag stripping can match words
     # surrounded by underscores, dots, or dashes.
     clean_name = clean_name.replace('.', ' ')
@@ -147,11 +151,14 @@ def clean_search_term(folder_name):
     clean_name = re.sub(
         r'\b(?:german|dubbed|uncut|director(?:s)?\s*cut|extended|remastered|'
         r'bluray|brrip|bdrip|dvdrip|webrip|web-dl|xvid|x264|x265|h\.?264|h\.?265|'
-        r'1080p|720p|2160p|uhd|hd|sd|ac3|dts|r5|videomann)\b',
+        r'1080p|720p|2160p|uhd|hd|sd|ac3|dts|r5|ld|proper|repack|readnfo|limited|'
+        r'videomann)\b',
         ' ',
         clean_name,
         flags=re.IGNORECASE
     )
+    # Strip XML/ASCII-art noise down to title words before final collapsing.
+    clean_name = re.sub(r'[^0-9A-Za-zÄÖÜäöüß ]+', ' ', clean_name)
     clean_name = re.sub(r'\bby\s+[A-Za-z0-9_-]+\b', ' ', clean_name, flags=re.IGNORECASE)
     clean_name = re.sub(r'\bby\b', ' ', clean_name, flags=re.IGNORECASE)
     clean_name = re.sub(r'\s+', ' ', clean_name).strip()
@@ -215,12 +222,16 @@ def collect_metadata_title_clues(folder_path, debug=False):
             return
         if raw_text.lstrip().startswith('<?xml'):
             return
+        if not explicit and raw_text.lstrip().startswith('<') and raw_text.rstrip().endswith('>'):
+            return
         # Skip obvious ASCII art / binary garbage / low-signal lines from scene NFOs.
         signal_chars = re.findall(r'[A-Za-z0-9ÄÖÜäöüß]', raw_text)
         if len(signal_chars) < 4:
             return
         cleaned_title = clean_search_term(raw_text)
         if not cleaned_title:
+            return
+        if cleaned_title.lower() in {'true', 'false'}:
             return
         words = normalize_title_for_match(cleaned_title)
         if not words:
@@ -272,6 +283,18 @@ def collect_metadata_title_clues(folder_path, debug=False):
                     line = line.strip()
                     if not line:
                         continue
+                    if line.startswith('<') and line.endswith('>'):
+                        tag_match = re.match(r'^<([A-Za-z_]+)>\s*([^<]+?)\s*</\1>$', line)
+                        if tag_match:
+                            tag_name = clean_search_term(tag_match.group(1)).lower()
+                            tag_value = tag_match.group(2)
+                            if any(token in tag_name for token in ('title', 'titel', 'original', 'sort', 'local')):
+                                maybe_add_title(tag_value, explicit=True)
+                        continue
+                    if '=' in line:
+                        key = clean_search_term(line.split('=', 1)[0]).lower()
+                        if key and not any(token in key for token in ('title', 'titel', 'original', 'sort', 'local')):
+                            continue
                     maybe_add_title(line, explicit=False)
                     # Try the right-hand side of free-form key/value lines too.
                     if ':' in line:
@@ -330,10 +353,10 @@ def collect_local_search_clues(folder_path, original_folder_name, debug=False):
     """Collect extra search phrases from filenames and relevant metadata lines."""
     clue_terms = []
     target_words = set(normalize_title_for_match(original_folder_name))
-    ignored_stems = {
-        'backdrop', 'banner', 'cdart', 'clearart', 'fanart', 'folder', 'logo',
-        'movie', 'poster', 'sample'
-    }
+    ignored_stem_pattern = re.compile(
+        r'^(?:backdrop\d*|banner\d*|cdart\d*|clearart\d*|fanart\d*|folder|logo\d*|movie|poster\d*|sample)$',
+        flags=re.IGNORECASE
+    )
 
     try:
         for root, dirs, files in os.walk(folder_path):
@@ -345,13 +368,34 @@ def collect_local_search_clues(folder_path, original_folder_name, debug=False):
                 ext = ext.lower()
 
                 cleaned_stem = clean_search_term(file_stem)
-                if cleaned_stem and cleaned_stem.lower() not in ignored_stems:
+                if cleaned_stem and not ignored_stem_pattern.match(cleaned_stem.lower()):
                     clue_terms.append(cleaned_stem)
 
                 if ext in TEXT_METADATA_EXTENSIONS:
                     text = read_metadata_text(file_path)
                     for line in text.splitlines():
-                        cleaned_line = clean_search_term(line)
+                        line = line.strip()
+                        if not line:
+                            continue
+                        if line.startswith('<') and line.endswith('>'):
+                            tag_match = re.match(r'^<([A-Za-z_]+)>\s*([^<]+?)\s*</\1>$', line)
+                            if tag_match:
+                                candidate_line = tag_match.group(2)
+                            else:
+                                continue
+                        elif ':' in line:
+                            key = clean_search_term(line.split(':', 1)[0]).lower()
+                            candidate_line = line.split(':', 1)[1] if (
+                                'title' in key or 'titel' in key or 'original' in key or 'sort' in key
+                            ) else line
+                        elif '=' in line:
+                            key = clean_search_term(line.split('=', 1)[0]).lower()
+                            if key and not any(token in key for token in ('title', 'titel', 'original', 'sort', 'local')):
+                                continue
+                            candidate_line = line.split('=', 1)[1]
+                        else:
+                            candidate_line = line
+                        cleaned_line = clean_search_term(candidate_line)
                         if not cleaned_line:
                             continue
                         line_words = set(normalize_title_for_match(cleaned_line))
@@ -646,6 +690,51 @@ def expand_search_term_variants(term):
                 variants.append(variant)
     return variants
 
+def is_presentable_local_title(term):
+    """Reject technical or placeholder strings as final display titles."""
+    cleaned = clean_search_term(term)
+    if not cleaned:
+        return False
+    if cleaned.lower() in {'true', 'false'}:
+        return False
+    words = normalize_title_for_match(cleaned)
+    if not words or len(words) > 8:
+        return False
+    lowered = cleaned.lower()
+    if any(token in lowered for token in ('videosource', 'audiosource', 'resolution', 'iconfile', 'hotkey', 'prop3')):
+        return False
+    return True
+
+def choose_preferred_local_title(candidate, search_terms, matched_search_term=None):
+    """Prefer a clean local title variant over a noisy folder slug when possible."""
+    candidate_titles = [candidate.get('title'), candidate.get('title_en')]
+    cleaned_terms = []
+    for term in search_terms or []:
+        cleaned = clean_search_term(term)
+        if cleaned and cleaned not in cleaned_terms:
+            cleaned_terms.append(cleaned)
+
+    cleaned_matched_term = clean_search_term(matched_search_term) if matched_search_term else None
+    if cleaned_matched_term and is_presentable_local_title(cleaned_matched_term):
+        if len(normalize_title_for_match(cleaned_matched_term)) >= 2:
+            return cleaned_matched_term
+
+    best_term = None
+    best_score = 0
+    for term in cleaned_terms:
+        if not is_presentable_local_title(term):
+            continue
+        score = max(title_match_score(term, movie_title) for movie_title in candidate_titles if movie_title)
+        if score > best_score:
+            best_score = score
+            best_term = term
+
+    if best_score > 0 and best_term:
+        return best_term
+    if cleaned_matched_term and is_presentable_local_title(cleaned_matched_term):
+        return cleaned_matched_term
+    return candidate.get('title')
+
 def fetch_imdb_details_from_search(imdb_id, search_terms, debug=False):
     """Recover IMDb details from localized search results when the title page blocks direct fetches."""
     terms = []
@@ -659,6 +748,25 @@ def fetch_imdb_details_from_search(imdb_id, search_terms, debug=False):
         terms.append(imdb_id)
 
     for search_term in terms:
+        suggestion_candidates = fetch_imdb_suggestion_candidates(
+            search_term,
+            debug=debug,
+            prefer_search_title=False,
+            allow_video=True
+        )
+        for candidate in suggestion_candidates:
+            if candidate.get('imdb_id') != imdb_id:
+                continue
+            candidate = dict(candidate)
+            candidate['title'] = choose_preferred_local_title(candidate, terms, matched_search_term=search_term)
+            candidate['title_de'] = candidate['title']
+            if debug:
+                print(
+                    f"  Recovered IMDb details for {imdb_id} from search term "
+                    f"'{search_term}' via suggestion JSON"
+                )
+            return candidate
+
         search_url = f"https://www.imdb.com/find?q={quote_plus(search_term)}&s=tt"
         try:
             response_de = requests.get(
@@ -696,7 +804,7 @@ def fetch_imdb_details_from_search(imdb_id, search_terms, debug=False):
                 if match_score <= 0:
                     continue
             if debug:
-                print(f"  Recovered IMDb details for {imdb_id} from search term '{search_term}'")
+                print(f"  Recovered IMDb details for {imdb_id} from search term '{search_term}' via HTML search")
             return candidate
     return None
 
@@ -707,6 +815,77 @@ def build_imdb_search_headers(language_header='de-DE,de;q=0.9,en-US;q=0.8,en;q=0
                       '(KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36',
         'Accept-Language': language_header
     }
+
+def build_imdb_suggestion_url(search_term):
+    """Build IMDb's suggestion JSON endpoint URL for a search term."""
+    cleaned = clean_search_term(search_term or '')
+    if not cleaned:
+        return None
+    slug = re.sub(r'\s+', '_', cleaned.strip().lower())
+    slug = quote(slug, safe='_')
+    if not slug:
+        return None
+    return f"https://v2.sg.media-imdb.com/suggestion/{slug[0]}/{slug}.json"
+
+def is_allowed_suggestion_item(item, allow_video=False):
+    """Allow only movie-like suggestion items from IMDb's JSON endpoint."""
+    item_id = (item.get('id') or '').lower()
+    qid = item.get('qid')
+    q_value = (item.get('q') or '').lower()
+    if not item_id.startswith('tt'):
+        return False
+    if not item.get('y') or not item.get('l'):
+        return False
+    if qid in {'movie', 'tvMovie', 'tvMiniSeries', 'tvSpecial'}:
+        return True
+    if allow_video and (qid == 'video' or q_value == 'video'):
+        return True
+    if q_value in {'feature', 'tv movie', 'tv mini-series', 'tv special'}:
+        return True
+    return False
+
+def extract_imdb_suggestion_candidates(search_term, data, prefer_search_title=False, allow_video=False):
+    """Convert IMDb suggestion JSON data into normalized candidate objects."""
+    candidates = []
+    preferred_title = clean_search_term(search_term or '')
+    for item in data.get('d', []):
+        if not is_allowed_suggestion_item(item, allow_video=allow_video):
+            continue
+        english_title = item.get('l')
+        if is_generic_imdb_title(english_title):
+            continue
+        display_title = preferred_title if prefer_search_title and preferred_title else english_title
+        candidates.append({
+            'title': display_title,
+            'title_de': display_title,
+            'title_en': english_title,
+            'year': str(item.get('y')),
+            'imdb_id': item.get('id')
+        })
+    return candidates
+
+def fetch_imdb_suggestion_candidates(search_term, debug=False, prefer_search_title=False, allow_video=False):
+    """Search IMDb's suggestion JSON endpoint and return normalized candidates."""
+    url = build_imdb_suggestion_url(search_term)
+    if not url:
+        return []
+    try:
+        response = requests.get(url, timeout=10)
+        response.raise_for_status()
+        data = response.json()
+    except Exception as exc:
+        if debug:
+            print(f"  Suggestion search failed for '{search_term}': {exc}")
+        return []
+    candidates = extract_imdb_suggestion_candidates(
+        search_term,
+        data,
+        prefer_search_title=prefer_search_title,
+        allow_video=allow_video
+    )
+    if debug:
+        print(f"DEBUG: Suggestion candidates for '{search_term}': {len(candidates)}")
+    return candidates
 
 def extract_search_result_title(link):
     """Extract a display title from an IMDb search-result node."""
@@ -833,6 +1012,15 @@ def search_imdb(
                     short_prefix != split_title
                 ):
                     search_terms.append(short_prefix)
+            if len(prefix_words) >= 2:
+                short_two_word_prefix = ' '.join(prefix_words[:2]).strip()
+                romanish = {'i', 'ii', 'iii', 'iv', 'v', 'vi', 'vii', 'viii', 'ix', 'x', 'xi', 'xii', 'xl'}
+                if (
+                    prefix_words[1].lower() in romanish or
+                    prefix_words[1].isdigit() or
+                    len(prefix_words[1]) <= 2
+                ) and short_two_word_prefix not in search_terms:
+                    search_terms.append(short_two_word_prefix)
         if clue_years:
             for clue_year in clue_years:
                 for title in title_candidates:
@@ -866,6 +1054,52 @@ def search_imdb(
                 term_weight += 1
             if is_clue_term:
                 term_weight += 3
+
+            suggestion_candidates = fetch_imdb_suggestion_candidates(
+                search_term,
+                debug=debug,
+                prefer_search_title=False
+            )
+            for details in suggestion_candidates[:8]:
+                imdb_id = details['imdb_id']
+                if imdb_id in results_by_id:
+                    details = results_by_id[imdb_id]
+                else:
+                    title_score = candidate_match_score(details, title_candidates, base_title=search_base)
+                    if title_score <= 0:
+                        if debug:
+                            print(f"  Ignoring loosely related result: {details['title']} ({details['year']})")
+                        continue
+                    results_by_id[imdb_id] = details
+                title_score = candidate_match_score(details, title_candidates, base_title=search_base)
+                score = candidate_scores.setdefault(imdb_id, {
+                    'score': 0,
+                    'hits': 0,
+                    'clue_hits': 0,
+                    'year_distance': None,
+                    'title_score': 0
+                })
+                score['score'] += term_weight + title_score
+                score['hits'] += 1
+                score['title_score'] = max(score['title_score'], title_score)
+                if is_clue_term:
+                    score['clue_hits'] += 1
+                if clue_years:
+                    distances = [abs(int(details['year']) - int(year)) for year in clue_years]
+                    if distances:
+                        best_distance = min(distances)
+                        if score['year_distance'] is None or best_distance < score['year_distance']:
+                            score['year_distance'] = best_distance
+                if imdb_id not in [result['imdb_id'] for result in all_results]:
+                    all_results.append(details)
+                if debug:
+                    print(
+                        f"  ✅ Found candidate: {details['title']} ({details['year']}) "
+                        f"[imdbid-{imdb_id}]"
+                    )
+
+            if suggestion_candidates:
+                continue
 
             search_url = f"https://www.imdb.com/find?q={quote_plus(search_term)}&s=tt"
             headers = build_imdb_search_headers()
