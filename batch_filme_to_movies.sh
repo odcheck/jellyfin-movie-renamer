@@ -43,17 +43,40 @@ echo "batch=$BATCH_SIZE | skip-archive=$SKIP_ARCHIVE"
 
 build_batch_list() {
   # Fresh scan of Filme, drop permanent skips, write up to BATCH_SIZE names.
+  # Pure Python filter — avoids `set -o pipefail` dying on `grep | head` SIGPIPE.
   python3 "$RENAMER" --generate-inputfile-from="$FILME" --fileoutput="$WORK"
   local full="$WORK/movielist.txt"
   local out="$WORK/batch_list.txt"
-  {
-    echo "# BASE_PATH=$FILME"
-    # names only, exclude archived skips
-    grep -v '^#' "$full" | grep -v '^[[:space:]]*$' | grep -Fvx -f "$SKIP_ARCHIVE" | head -n "$BATCH_SIZE"
-  } > "$out"
-  # count remaining after skip filter (not just this batch)
-  REMAINING=$(grep -v '^#' "$full" | grep -v '^[[:space:]]*$' | grep -Fvx -f "$SKIP_ARCHIVE" | grep -c . || true)
-  BATCH_COUNT=$(grep -v '^#' "$out" | grep -c '[^[:space:]]' || true)
+  eval "$(python3 - "$full" "$SKIP_ARCHIVE" "$out" "$FILME" "$BATCH_SIZE" <<'PY'
+import sys
+from pathlib import Path
+
+full, skip_path, out_path, filme, batch_size = sys.argv[1:6]
+batch_size = int(batch_size)
+skips = {
+    line.strip()
+    for line in Path(skip_path).read_text(encoding="utf-8", errors="ignore").splitlines()
+    if line.strip()
+}
+names = []
+for line in Path(full).read_text(encoding="utf-8", errors="ignore").splitlines():
+    name = line.strip()
+    if not name or name.startswith("#"):
+        continue
+    if name in skips:
+        continue
+    names.append(name)
+
+remaining = len(names)
+batch = names[:batch_size]
+Path(out_path).write_text(
+    "# BASE_PATH=%s\n%s" % (filme, "".join(n + "\n" for n in batch)),
+    encoding="utf-8",
+)
+print("REMAINING=%d" % remaining)
+print("BATCH_COUNT=%d" % len(batch))
+PY
+)"
 }
 
 parse_success_movable() {
