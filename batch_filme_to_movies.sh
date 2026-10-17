@@ -1,15 +1,15 @@
 #!/usr/bin/env bash
-# Batch: dry-run N → execute successes → mv to Movies → next batch until done.
-# Resume-safe via offset file. Skips stay in Filme.
+# Batch: rescan Filme → dry-run N → execute successes → mv to Movies → repeat.
+# Movielist is rebuilt every batch from what is still in Filme.
+# Skips are remembered so they are not retried forever.
 set -euo pipefail
 
 BATCH_SIZE="${BATCH_SIZE:-10}"
 FILME="${FILME:-/path/to/Source}"
 MOVIES="${MOVIES:-/path/to/Destination}"
 WORK="${WORK_DIR:-$HOME/filme_batch_work}"
-MOVIELIST="${MOVIELIST:-$HOME/movielist.txt}"
 RENAMER="$(cd "$(dirname "$0")" && pwd)/movie_renamer.py"
-OFFSET_FILE="$WORK/offset"
+SKIP_ARCHIVE="$WORK/permanent_skipped.txt"
 ONCE=0
 
 while [[ $# -gt 0 ]]; do
@@ -18,10 +18,13 @@ while [[ $# -gt 0 ]]; do
     --batch-size) BATCH_SIZE="$2"; shift 2 ;;
     --filme) FILME="$2"; shift 2 ;;
     --movies) MOVIES="$2"; shift 2 ;;
-    --reset-offset) rm -f "$OFFSET_FILE"; shift ;;
+    --reset-skips) rm -f "$SKIP_ARCHIVE"; shift ;;
     -h|--help)
-      echo "Usage: $0 [--once] [--batch-size N] [--reset-offset] [--filme PATH] [--movies PATH]"
-      echo "Env: BATCH_SIZE FILME MOVIES WORK_DIR MOVIELIST"
+      echo "Usage: $0 [--once] [--batch-size N] [--reset-skips] [--filme PATH] [--movies PATH]"
+      echo "Env: BATCH_SIZE FILME MOVIES WORK_DIR"
+      echo
+      echo "Each batch rescans Filme (fresh list). Successes are moved to Movies."
+      echo "IMDb skips are appended to $SKIP_ARCHIVE and ignored next round."
       exit 0
       ;;
     *) echo "Unknown arg: $1" >&2; exit 1 ;;
@@ -29,25 +32,31 @@ while [[ $# -gt 0 ]]; do
 done
 
 mkdir -p "$WORK"
+touch "$SKIP_ARCHIVE"
 [[ -d "$FILME" ]] || { echo "Filme path missing: $FILME" >&2; exit 1; }
 [[ -d "$MOVIES" ]] || { echo "Movies path missing: $MOVIES" >&2; exit 1; }
 [[ -f "$RENAMER" ]] || { echo "Renamer missing: $RENAMER" >&2; exit 1; }
 
-if [[ ! -f "$MOVIELIST" ]]; then
-  echo "Generating $MOVIELIST from $FILME ..."
-  python3 "$RENAMER" --generate-inputfile-from="$FILME" --fileoutput="$(dirname "$MOVIELIST")"
-fi
-
-TOTAL=$(grep -v '^#' "$MOVIELIST" | grep -c '[^[:space:]]' || true)
-OFFSET=0
-[[ -f "$OFFSET_FILE" ]] && OFFSET=$(cat "$OFFSET_FILE")
-
-echo "Total in list: $TOTAL | offset: $OFFSET | batch: $BATCH_SIZE"
 echo "Filme=$FILME"
 echo "Movies=$MOVIES"
+echo "batch=$BATCH_SIZE | skip-archive=$SKIP_ARCHIVE"
+
+build_batch_list() {
+  # Fresh scan of Filme, drop permanent skips, write up to BATCH_SIZE names.
+  python3 "$RENAMER" --generate-inputfile-from="$FILME" --fileoutput="$WORK"
+  local full="$WORK/movielist.txt"
+  local out="$WORK/batch_list.txt"
+  {
+    echo "# BASE_PATH=$FILME"
+    # names only, exclude archived skips
+    grep -v '^#' "$full" | grep -v '^[[:space:]]*$' | grep -Fvx -f "$SKIP_ARCHIVE" | head -n "$BATCH_SIZE"
+  } > "$out"
+  # count remaining after skip filter (not just this batch)
+  REMAINING=$(grep -v '^#' "$full" | grep -v '^[[:space:]]*$' | grep -Fvx -f "$SKIP_ARCHIVE" | grep -c . || true)
+  BATCH_COUNT=$(grep -v '^#' "$out" | grep -c '[^[:space:]]' || true)
+}
 
 parse_success_movable() {
-  # Reads success.txt + optional backlog.txt → prints "original<TAB>new" for movable hits.
   local success_file="$1"
   local backlog_file="$2"
   python3 - "$success_file" "$backlog_file" <<'PY'
@@ -76,21 +85,50 @@ for block in text.split("\n\n"):
 PY
 }
 
-while (( OFFSET < TOTAL )); do
+while true; do
+  build_batch_list
   echo
-  echo "========== BATCH offset=$OFFSET limit=$BATCH_SIZE =========="
+  echo "========== remaining≈$REMAINING | this batch=$BATCH_COUNT =========="
 
-  # Fresh outputs for this batch
+  if (( BATCH_COUNT == 0 )); then
+    echo "Nothing left to try (Filme empty of non-skipped folders)."
+    break
+  fi
+
   : > "$WORK/success.txt"
   : > "$WORK/backlog.txt"
   : > "$WORK/backlog_skipped.txt"
 
   python3 "$RENAMER" \
-    --input="$MOVIELIST" \
-    --offset="$OFFSET" \
-    --limit="$BATCH_SIZE" \
+    --input="$WORK/batch_list.txt" \
     --success-file="$WORK/success.txt" \
     --backlog-file="$WORK/backlog.txt"
+
+  # Remember IMDb skips so the next rescan does not retry them forever
+  if [[ -f "$WORK/backlog_skipped.txt" ]]; then
+    while IFS= read -r line; do
+      [[ -z "$line" ]] && continue
+      name="${line%% |*}"
+      name="${name#"${name%%[![:space:]]*}"}"
+      name="${name%"${name##*[![:space:]]}"}"
+      [[ -n "$name" ]] || continue
+      if ! grep -Fxq "$name" "$SKIP_ARCHIVE"; then
+        printf '%s\n' "$name" >> "$SKIP_ARCHIVE"
+        echo "Archived skip: $name"
+      fi
+    done < "$WORK/backlog_skipped.txt"
+  fi
+
+  # Folder renamed but no video → leave in Filme, don't retry as success-move
+  if [[ -f "$WORK/backlog.txt" ]]; then
+    while IFS= read -r name; do
+      [[ -z "$name" ]] && continue
+      if ! grep -Fxq "$name" "$SKIP_ARCHIVE"; then
+        printf '%s\n' "$name" >> "$SKIP_ARCHIVE"
+        echo "Archived backlog (no video): $name"
+      fi
+    done < "$WORK/backlog.txt"
+  fi
 
   mapfile -t MOVABLE < <(parse_success_movable "$WORK/success.txt" "$WORK/backlog.txt" || true)
 
@@ -130,18 +168,11 @@ while (( OFFSET < TOTAL )); do
     done
   fi
 
-  OFFSET=$((OFFSET + BATCH_SIZE))
-  echo "$OFFSET" > "$OFFSET_FILE"
-  echo "Offset saved: $OFFSET / $TOTAL"
-
   if (( ONCE )); then
     echo "Stopping after --once."
     break
   fi
 done
 
-if (( OFFSET >= TOTAL )); then
-  echo
-  echo "Done. All $TOTAL list entries visited (skips remain in Filme)."
-  rm -f "$OFFSET_FILE"
-fi
+echo
+echo "Done. Skips/backlog kept in Filme; see $SKIP_ARCHIVE"
