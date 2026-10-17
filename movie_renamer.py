@@ -58,6 +58,8 @@ parser.add_argument(
 )
 parser.add_argument('--execute', action='store_true', help='Actually rename files (disable dry-run)')
 parser.add_argument('--debug', action='store_true', help='Enable verbose IMDB search debugging')
+parser.add_argument('--limit', type=int, default=None, help='Process at most N movies from the input file')
+parser.add_argument('--offset', type=int, default=0, help='Skip the first N movies in the input file')
 args = parser.parse_args()
 
 # Configuration
@@ -2252,6 +2254,17 @@ def main():
     except Exception as e:
         print(f"Error reading input file {args.input}: {e}")
         return
+
+    total_loaded = len(movies_to_process)
+    if args.offset:
+        movies_to_process = movies_to_process[args.offset:]
+    if args.limit is not None:
+        movies_to_process = movies_to_process[:args.limit]
+    if args.offset or args.limit is not None:
+        print(
+            f"Batch: offset={args.offset}, limit={args.limit} "
+            f"→ {len(movies_to_process)} of {total_loaded} movies"
+        )
 
     base_path = resolve_base_path(args.input)
     
