@@ -155,6 +155,12 @@ This prints:
 
 --debug
     Enable verbose debugging output
+
+--limit N
+    Process at most N movies from the input file
+
+--offset N
+    Skip the first N movies (use with --limit for batches)
 ```
 
 ## Default Files
