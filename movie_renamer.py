@@ -1614,7 +1614,7 @@ def search_imdb(
         if len(unique_results) > 1:
             if target_year:
                 near_year_matches = [
-                    result for result in ranked_results
+                    result for result in unique_results
                     if abs(int(result['year']) - int(target_year)) <= 1 and
                     candidate_scores.get(result['imdb_id'], {}).get('title_score', 0) >= 235
                 ]
@@ -1637,6 +1637,16 @@ def search_imdb(
                 if debug:
                     print(
                         f"  No IMDB result matches the year in folder name ({target_year}). Skipping."
+                    )
+                return None
+
+            # Same title, different years, no folder year → skip.
+            # IMDb popularity must not pick e.g. old vs new "Der Andere".
+            if len(years) > 1:
+                if debug:
+                    print(
+                        f"  Multiple versions found with different years {sorted(years)}, "
+                        f"but no year in folder name. Skipping to avoid ambiguity."
                     )
                 return None
 
@@ -1694,13 +1704,7 @@ def search_imdb(
                     )
                 return best_result
             if debug:
-                if len(years) > 1:
-                    print(
-                        f"  Multiple versions found with different years {sorted(years)}, "
-                        f"but no year in folder name. Skipping to avoid ambiguity."
-                    )
-                else:
-                    print("  Multiple similar IMDB results found. Skipping to avoid ambiguity.")
+                print("  Multiple similar IMDB results found. Skipping to avoid ambiguity.")
             return None
 
         result = unique_results[0]

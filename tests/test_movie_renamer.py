@@ -8,10 +8,8 @@ from unittest import mock
 
 def load_module():
     sys.argv = ['movie_renamer.py']
-    spec = importlib.util.spec_from_file_location(
-        'movie_renamer',
-        '/home/ben/git/jellyfin-movie-renamer/movie_renamer.py'
-    )
+    script_path = os.path.join(os.path.dirname(__file__), '..', 'movie_renamer.py')
+    spec = importlib.util.spec_from_file_location('movie_renamer', script_path)
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
     return module
@@ -308,6 +306,48 @@ class MovieRenamerTests(unittest.TestCase):
             self.mod.clean_search_term('Die_JungfrauenquelleDas_SchweigenI (1960)'),
             'Die Jungfrauenquelle Das Schweigen I'
         )
+
+    def test_same_title_different_years_skipped_without_year(self):
+        """Old vs new 'Der Andere': no folder year → skip, never pick by IMDb rank."""
+        old = {
+            'title': 'Der Andere', 'title_en': 'The Other', 'year': '1930',
+            'imdb_id': 'tt0021000', 'imdb_rank': 1000,
+        }
+        new = {
+            'title': 'Der Andere', 'title_en': 'The Other One', 'year': '2008',
+            'imdb_id': 'tt1234567', 'imdb_rank': 50000,
+        }
+
+        def fake_suggestions(search_term, debug=False, prefer_search_title=False, allow_video=False):
+            return [old, new]
+
+        with mock.patch.object(self.mod, 'fetch_imdb_suggestion_candidates', side_effect=fake_suggestions):
+            with mock.patch.object(self.mod, 'requests') as fake_requests:
+                fake_requests.get.side_effect = AssertionError('should not hit find page')
+                result = self.mod.search_imdb('Der Andere', 'Der Andere', clue_years=None, debug=False)
+
+        self.assertIsNone(result)
+
+    def test_same_title_resolved_by_folder_year(self):
+        old = {
+            'title': 'Der Andere', 'title_en': 'The Other', 'year': '1930',
+            'imdb_id': 'tt0021000', 'imdb_rank': 1000,
+        }
+        new = {
+            'title': 'Der Andere', 'title_en': 'The Other One', 'year': '2008',
+            'imdb_id': 'tt1234567', 'imdb_rank': 50000,
+        }
+
+        def fake_suggestions(search_term, debug=False, prefer_search_title=False, allow_video=False):
+            return [old, new]
+
+        with mock.patch.object(self.mod, 'fetch_imdb_suggestion_candidates', side_effect=fake_suggestions):
+            result = self.mod.search_imdb(
+                'Der Andere', 'Der Andere (2008)', clue_years=None, debug=False
+            )
+
+        self.assertEqual(result['imdb_id'], 'tt1234567')
+        self.assertEqual(result['year'], '2008')
 
 
 if __name__ == '__main__':

@@ -72,7 +72,7 @@ python3 movie_renamer.py --generate-inputfile-from=/path/to/movies --fileoutput=
 Example:
 
 ```bash
-python3 movie_renamer.py --generate-inputfile-from=/mnt/nfs/huddle/media/Filme/_RUN --fileoutput=/home/ben
+python3 movie_renamer.py --generate-inputfile-from=/mnt/nfs/huddle/media/Filme --fileoutput=/home/ben
 ```
 
 This creates:
@@ -84,7 +84,7 @@ This creates:
 The generated file also stores the source folder in a header:
 
 ```text
-# BASE_PATH=/mnt/nfs/huddle/media/Filme/_RUN
+# BASE_PATH=/mnt/nfs/huddle/media/Filme
 ```
 
 That means a later `--input` run automatically knows where to look.
@@ -261,7 +261,7 @@ super_movie (1968)[imdbid-123456]-cd2.avi
 1. Generate a list:
 
 ```bash
-python3 movie_renamer.py --generate-inputfile-from=/mnt/nfs/huddle/media/Filme/_RUN --fileoutput=/home/ben
+python3 movie_renamer.py --generate-inputfile-from=/mnt/nfs/huddle/media/Filme --fileoutput=/home/ben
 ```
 
 2. Inspect with dry-run:
