@@ -348,6 +348,17 @@ class TriageApp(tk.Tk):
             side="left", padx=4
         )
 
+        id_row = ttk.Frame(detail)
+        id_row.pack(fill="x", pady=4)
+        ttk.Label(id_row, text="IMDb:").pack(side="left")
+        self.imdb_var = tk.StringVar()
+        id_entry = ttk.Entry(id_row, textvariable=self.imdb_var, width=14)
+        id_entry.pack(side="left", padx=4)
+        id_entry.bind("<Return>", lambda _e: self.apply_imdb_id())
+        ttk.Button(id_row, text="IMDb-ID setzen → Pending", command=self.apply_imdb_id).pack(
+            side="left", padx=4
+        )
+
         btns = ttk.Frame(detail)
         btns.pack(fill="x", pady=4)
         ttk.Button(btns, text="Ordner öffnen", command=self.open_folder).pack(side="left", padx=2)
@@ -581,6 +592,24 @@ class TriageApp(tk.Tk):
             m = re.search(r"(?<!\d)(19\d{2}|20\d{2})(?!\d)", name)
             year_guess = m.group(1) if m else ""
         self.year_var.set(year_guess)
+        # Prefill IMDb ID from existing local metadata if present.
+        existing_id = ""
+        try:
+            for path in folder.rglob("*"):
+                if not path.is_file():
+                    continue
+                if path.suffix.lower() not in {".nfo", ".txt", ".xml"}:
+                    continue
+                if any(p.startswith(".") or p.startswith("@") for p in path.parts):
+                    continue
+                text = path.read_text(encoding="utf-8", errors="ignore")
+                m = re.search(r"\b(tt\d{7,9})\b", text, flags=re.IGNORECASE)
+                if m:
+                    existing_id = m.group(1).lower()
+                    break
+        except OSError:
+            pass
+        self.imdb_var.set(existing_id)
         self.files.delete(0, "end")
         if not folder.is_dir():
             self.status_var.set("Ordner fehlt unter Filme/")
@@ -706,6 +735,36 @@ class TriageApp(tk.Tk):
         self.queue_for_batch(name)
         self.refresh_list(select_index=self.selected_index() or 0)
         self.status_var.set(f"→ Pending: {name} ({len(self.pending)})")
+
+    def apply_imdb_id(self):
+        """Write tt… into movie.nfo so the renamer uses it authoritatively."""
+        name = self.selected_name()
+        if not name:
+            return
+        folder = FILME / name
+        if not folder.is_dir():
+            messagebox.showerror("Fehler", f"Ordner fehlt:\n{folder}")
+            return
+        raw = self.imdb_var.get().strip()
+        m = re.search(r"(tt\d{7,9})", raw, flags=re.IGNORECASE)
+        if not m:
+            messagebox.showerror("Fehler", "IMDb-ID erwartet, z.B. tt0089563")
+            return
+        imdb_id = m.group(1).lower()
+        nfo = folder / "movie.nfo"
+        try:
+            nfo.write_text(
+                f"<movie>\n  <title>{name}</title>\n  <imdbid>{imdb_id}</imdbid>\n"
+                f"  <uniqueid type=\"imdb\">{imdb_id}</uniqueid>\n</movie>\n",
+                encoding="utf-8",
+            )
+        except OSError as exc:
+            messagebox.showerror("Fehler", f"Konnte movie.nfo nicht schreiben:\n{exc}")
+            return
+        self.remove_from_skip_archive(name)
+        self.queue_for_batch(name)
+        self.refresh_list(select_index=self.selected_index() or 0)
+        self.status_var.set(f"IMDb {imdb_id} → {nfo.name} · Pending {len(self.pending)}")
 
     def convert_ratdvd(self):
         name = self.selected_name()
