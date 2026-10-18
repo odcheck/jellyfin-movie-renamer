@@ -19,8 +19,7 @@ DVD_QUEUE = Path(os.environ.get("DVD_QUEUE", WORK / "dvd_manual.txt"))
 PENDING_FILE = Path(os.environ.get("PENDING_FILE", WORK / "pending_batch.txt"))
 SCRIPT_DIR = Path(__file__).resolve().parent
 RENAMER = SCRIPT_DIR / "movie_renamer.py"
-RATDVD_TOOL = SCRIPT_DIR / "ratdvd_to_video_ts.py"
-DIVX_TOOL = SCRIPT_DIR / "divx_to_mp4.py"
+MEDIA_TO_MP4 = SCRIPT_DIR / "media_to_mp4.py"
 VIDEO_EXT = {".mkv", ".mp4", ".avi", ".mov", ".m4v", ".wmv", ".mpg", ".mpeg", ".m2ts", ".ts", ".divx"}
 IGNORABLE_NAMES = {".@", "@eaDir", "Thumbs.db", "desktop.ini", ".DS_Store"}
 
@@ -304,6 +303,9 @@ class TriageApp(tk.Tk):
         ttk.Button(top, text="Rescan Filme", command=self.rescan_filme).pack(side="left", padx=4)
         self.batch_btn = ttk.Button(top, text="Batch ×0", command=self.run_batch)
         self.batch_btn.pack(side="left", padx=4)
+        ttk.Button(top, text="Batch Medien→mp4", command=self.run_media_convert_batch).pack(
+            side="left", padx=4
+        )
         ttk.Button(top, text="Pending leeren", command=self.clear_pending).pack(side="left", padx=2)
         self.count_var = tk.StringVar()
         ttk.Label(top, textvariable=self.count_var).pack(side="right")
@@ -361,16 +363,15 @@ class TriageApp(tk.Tk):
         ttk.Button(btns, text="Video abspielen", command=self.play_video).pack(side="left", padx=2)
         ttk.Button(btns, text="→ Pending", command=self.add_to_pending).pack(side="left", padx=2)
         ttk.Button(btns, text="Als DVD ablegen", command=self.mark_dvd).pack(side="left", padx=2)
-        ttk.Button(btns, text="ratDVD → VIDEO_TS", command=self.convert_ratdvd).pack(side="left", padx=2)
-        ttk.Button(btns, text="divx → mp4", command=self.convert_divx).pack(side="left", padx=2)
+        ttk.Button(btns, text="→ mp4", command=self.convert_media_one).pack(side="left", padx=2)
         ttk.Button(btns, text="Ordner löschen", command=self.delete_folder).pack(side="left", padx=2)
         ttk.Button(btns, text="Unskip", command=self.unskip).pack(side="left", padx=2)
         ttk.Button(btns, text="Nächster", command=self.next_item).pack(side="left", padx=2)
 
         ttk.Label(
             detail,
-            text="Liste = alle Ordner in Filme/ (Rescan). "
-                 "Jahr und/oder IMDb setzen (eins oder beides) → Pending → Batch ×N.",
+            text="Jahr/IMDb → Pending → Batch ×N (Rename). "
+                 "divx/DVD/ratDVD → „→ mp4“ oder „Batch Medien→mp4“ (Deutsch, ohne Subs).",
             wraplength=560,
         ).pack(anchor="w", pady=(2, 8))
 
@@ -568,14 +569,18 @@ class TriageApp(tk.Tk):
         multi = "multi-movie" in self.reasons.get(name, "").lower()
         rats = find_ratdvds(folder)
         divxs = find_divx_files(folder)
-        if rats:
-            self.dvd_var.set(f"ratDVD gefunden ({rats[0].name}) — „ratDVD → VIDEO_TS“")
-        elif divxs:
-            self.dvd_var.set(f"divx gefunden ({divxs[0].name}) — „divx → mp4“")
-        elif is_dvd and multi:
-            self.dvd_var.set("DVD erkannt — eher Multi-Movie-Set → „Als DVD ablegen“")
-        elif is_dvd:
-            self.dvd_var.set("DVD erkannt — Jahr setzen (→ Batch) oder „Als DVD ablegen“")
+        if rats or divxs or is_dvd:
+            bits = []
+            if rats:
+                bits.append("ratDVD")
+            if divxs:
+                bits.append("divx")
+            if is_dvd:
+                bits.append("VIDEO_TS")
+            self.dvd_var.set(
+                " + ".join(bits) + " — „→ mp4“ (Deutsch, ohne Untertitel) "
+                "oder Batch Medien→mp4"
+            )
         elif multi:
             self.dvd_var.set("Als Multi-Movie-DVD-Set gemeldet")
         else:
@@ -765,99 +770,96 @@ class TriageApp(tk.Tk):
         self.refresh_list(select_index=self.selected_index() or 0)
         self.status_var.set(f"→ Pending: {name} ({len(self.pending)})")
 
-    def convert_ratdvd(self):
+    def folder_needs_media_convert(self, folder: Path) -> bool:
+        return bool(
+            find_divx_files(folder)
+            or find_ratdvds(folder)
+            or has_dvd_structure(folder)
+        )
+
+    def convert_media_one(self):
         name = self.selected_name()
         if not name:
             return
         folder = FILME / name
-        rats = find_ratdvds(folder)
-        if not rats:
-            messagebox.showinfo("ratDVD", "Keine .ratDVD-Datei in diesem Ordner.")
+        if not self.folder_needs_media_convert(folder):
+            messagebox.showinfo("mp4", "Kein divx / ratDVD / VIDEO_TS in diesem Ordner.")
             return
-        if not RATDVD_TOOL.is_file():
-            messagebox.showerror("Fehler", f"Fehlt: {RATDVD_TOOL}")
+        if not MEDIA_TO_MP4.is_file():
+            messagebox.showerror("Fehler", f"Fehlt: {MEDIA_TO_MP4}")
             return
         if not messagebox.askyesno(
-            "ratDVD → VIDEO_TS",
-            f"Extrahieren nach VIDEO_TS/ und .ratDVD danach löschen?\n\n"
-            f"{rats[0].name}\n\n"
-            f"(XVO→VOB, IFO→BUP; dauert bei großen Dateien)",
+            "→ mp4",
+            f"Nach MP4 wandeln (Deutsch, ohne Untertitel)?\n"
+            f"Quellen (divx/DVD/ratDVD) werden danach entfernt.\n\n{name}",
         ):
             return
-        self.status_var.set("ratDVD-Konvertierung läuft…")
-        self.update_idletasks()
+        self._start_media_convert([folder], title=f"mp4: {name}")
+
+    def run_media_convert_batch(self):
+        if not MEDIA_TO_MP4.is_file():
+            messagebox.showerror("Fehler", f"Fehlt: {MEDIA_TO_MP4}")
+            return
+        targets = [
+            FILME / name
+            for name in self.folders
+            if self.folder_needs_media_convert(FILME / name)
+        ]
+        if not targets:
+            messagebox.showinfo("Batch Medien→mp4", "Nichts zu konvertieren.")
+            return
+        preview = "\n".join(p.name for p in targets[:20])
+        if len(targets) > 20:
+            preview += f"\n… +{len(targets) - 20} weitere"
+        if not messagebox.askyesno(
+            "Batch Medien→mp4",
+            f"{len(targets)} Ordner nach MP4 (Deutsch, ohne Subs)?\n\n{preview}",
+        ):
+            return
+        self._start_media_convert(targets, title=f"Medien→mp4 ×{len(targets)}")
+
+    def _start_media_convert(self, folders: list, title: str):
+        win = BatchProgressWindow(self, [p.name for p in folders])
+        win.title(title)
+        self.status_var.set(f"{title} gestartet…")
 
         def worker():
+            ok = True
+            summary = "Fertig"
             try:
-                proc = subprocess.run(
-                    ["python3", str(RATDVD_TOOL), str(folder)],
-                    cwd=str(SCRIPT_DIR),
-                    capture_output=True,
-                    text=True,
-                )
-                out = (proc.stdout or "") + (proc.stderr or "")
-                self.after(0, lambda: self._ratdvd_done(proc.returncode, out, name))
+                for i, folder in enumerate(folders, 1):
+                    win.set_phase(f"[{i}/{len(folders)}] {folder.name}", i - 1)
+                    win.log(f"\n=== {folder.name} ===")
+                    proc = subprocess.Popen(
+                        ["python3", str(MEDIA_TO_MP4), str(folder)],
+                        cwd=str(SCRIPT_DIR),
+                        stdout=subprocess.PIPE,
+                        stderr=subprocess.STDOUT,
+                        text=True,
+                        bufsize=1,
+                    )
+                    assert proc.stdout is not None
+                    for line in proc.stdout:
+                        win.log(line.rstrip("\n"))
+                    rc = proc.wait()
+                    if rc != 0:
+                        ok = False
+                        win.log(f"ERROR exit {rc}")
+                win.set_phase("Fertig", len(folders))
+                summary = f"{'OK' if ok else 'Mit Fehlern'} — {len(folders)} Ordner"
             except Exception as exc:
-                self.after(0, lambda: self._ratdvd_done(1, str(exc), name))
+                ok = False
+                win.log(f"ERROR: {exc}")
+                summary = str(exc)
+            win.done(ok, summary)
+            self.after(0, self._media_convert_finished)
 
         threading.Thread(target=worker, daemon=True).start()
 
-    def _ratdvd_done(self, rc, out, name):
-        if rc != 0:
-            messagebox.showerror("ratDVD fehlgeschlagen", out[-2000:] or f"exit {rc}")
-            self.status_var.set("ratDVD fehlgeschlagen")
-            return
-        messagebox.showinfo("ratDVD", f"Fertig: {name}/VIDEO_TS\n\n" + (out[-800:] if out else ""))
+    def _media_convert_finished(self):
         self.folders = scan_filme_folders()
-        self.refresh_list(select_index=self.selected_index() or 0)
-        self.status_var.set(f"ratDVD → VIDEO_TS ok: {name}")
-
-    def convert_divx(self):
-        name = self.selected_name()
-        if not name:
-            return
-        folder = FILME / name
-        divxs = find_divx_files(folder)
-        if not divxs:
-            messagebox.showinfo("divx", "Keine .divx-Datei in diesem Ordner.")
-            return
-        if not DIVX_TOOL.is_file():
-            messagebox.showerror("Fehler", f"Fehlt: {DIVX_TOOL}")
-            return
-        names = "\n".join(p.name for p in divxs[:8])
-        if not messagebox.askyesno(
-            "divx → mp4",
-            f"{len(divxs)} Datei(en) nach .mp4 wandeln und .divx löschen?\n\n{names}\n\n"
-            f"(ffmpeg; kann bei großen Dateien dauern)",
-        ):
-            return
-        self.status_var.set("divx→mp4 läuft…")
-        self.update_idletasks()
-
-        def worker():
-            try:
-                proc = subprocess.run(
-                    ["python3", str(DIVX_TOOL), str(folder)],
-                    cwd=str(SCRIPT_DIR),
-                    capture_output=True,
-                    text=True,
-                )
-                out = (proc.stdout or "") + (proc.stderr or "")
-                self.after(0, lambda: self._divx_done(proc.returncode, out, name))
-            except Exception as exc:
-                self.after(0, lambda: self._divx_done(1, str(exc), name))
-
-        threading.Thread(target=worker, daemon=True).start()
-
-    def _divx_done(self, rc, out, name):
-        if rc != 0:
-            messagebox.showerror("divx→mp4 fehlgeschlagen", out[-2000:] or f"exit {rc}")
-            self.status_var.set("divx→mp4 fehlgeschlagen")
-            return
-        messagebox.showinfo("divx→mp4", f"Fertig: {name}\n\n" + (out[-800:] if out else ""))
-        self.folders = scan_filme_folders()
-        self.refresh_list(select_index=self.selected_index() or 0)
-        self.status_var.set(f"divx→mp4 ok: {name}")
+        self.refresh_list(select_index=0)
+        self.status_var.set("Medien→mp4 Batch fertig — Rescan ok")
 
     def mark_dvd(self):
         name = self.selected_name()
