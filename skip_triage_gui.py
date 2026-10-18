@@ -20,6 +20,7 @@ PENDING_FILE = Path(os.environ.get("PENDING_FILE", WORK / "pending_batch.txt"))
 SCRIPT_DIR = Path(__file__).resolve().parent
 RENAMER = SCRIPT_DIR / "movie_renamer.py"
 RATDVD_TOOL = SCRIPT_DIR / "ratdvd_to_video_ts.py"
+DIVX_TOOL = SCRIPT_DIR / "divx_to_mp4.py"
 VIDEO_EXT = {".mkv", ".mp4", ".avi", ".mov", ".m4v", ".wmv", ".mpg", ".mpeg", ".m2ts", ".ts", ".divx"}
 IGNORABLE_NAMES = {".@", "@eaDir", "Thumbs.db", "desktop.ini", ".DS_Store"}
 
@@ -110,6 +111,19 @@ def find_ratdvds(folder: Path):
     if not folder.is_dir():
         return []
     return sorted(folder.glob("*.ratDVD")) + sorted(folder.glob("*.ratdvd"))
+
+
+def find_divx_files(folder: Path):
+    if not folder.is_dir():
+        return []
+    found = []
+    for path in folder.rglob("*"):
+        if not path.is_file() or path.suffix.lower() != ".divx":
+            continue
+        if any(p.startswith(".") or p.startswith("@") for p in path.parts):
+            continue
+        found.append(path)
+    return sorted(found)
 
 
 def has_dvd_structure(folder: Path) -> bool:
@@ -341,6 +355,7 @@ class TriageApp(tk.Tk):
         ttk.Button(btns, text="→ Pending", command=self.add_to_pending).pack(side="left", padx=2)
         ttk.Button(btns, text="Als DVD ablegen", command=self.mark_dvd).pack(side="left", padx=2)
         ttk.Button(btns, text="ratDVD → VIDEO_TS", command=self.convert_ratdvd).pack(side="left", padx=2)
+        ttk.Button(btns, text="divx → mp4", command=self.convert_divx).pack(side="left", padx=2)
         ttk.Button(btns, text="Ordner löschen", command=self.delete_folder).pack(side="left", padx=2)
         ttk.Button(btns, text="Unskip", command=self.unskip).pack(side="left", padx=2)
         ttk.Button(btns, text="Nächster", command=self.next_item).pack(side="left", padx=2)
@@ -408,6 +423,8 @@ class TriageApp(tk.Tk):
             tags.append("LEER")
         if find_ratdvds(folder):
             tags.append("ratDVD")
+        if find_divx_files(folder):
+            tags.append("divx")
         if has_dvd_structure(folder):
             tags.append("DVD")
         reason = self.reasons.get(name, "").lower()
@@ -544,8 +561,11 @@ class TriageApp(tk.Tk):
         is_dvd = has_dvd_structure(folder)
         multi = "multi-movie" in self.reasons.get(name, "").lower()
         rats = find_ratdvds(folder)
+        divxs = find_divx_files(folder)
         if rats:
             self.dvd_var.set(f"ratDVD gefunden ({rats[0].name}) — „ratDVD → VIDEO_TS“")
+        elif divxs:
+            self.dvd_var.set(f"divx gefunden ({divxs[0].name}) — „divx → mp4“")
         elif is_dvd and multi:
             self.dvd_var.set("DVD erkannt — eher Multi-Movie-Set → „Als DVD ablegen“")
         elif is_dvd:
@@ -567,6 +587,11 @@ class TriageApp(tk.Tk):
             return
         for rat in find_ratdvds(folder):
             self.files.insert("end", rat.name + " [ratDVD]")
+        for divx in find_divx_files(folder):
+            try:
+                self.files.insert("end", str(divx.relative_to(folder)) + " [divx]")
+            except ValueError:
+                self.files.insert("end", divx.name + " [divx]")
         if is_dvd:
             self.files.insert("end", "(DVD-Struktur erkannt)")
             for marker in ("VIDEO_TS", "AUDIO_TS"):
@@ -643,6 +668,13 @@ class TriageApp(tk.Tk):
         base = re.sub(r"[_\s.-](19\d{2}|20\d{2})$", "", base).strip()
         new_name = f"{base} ({year})"
         dest = FILME / new_name
+        # Same path (already "Title (year)") → just queue for batch.
+        if dest.resolve() == folder.resolve():
+            self.remove_from_skip_archive(name)
+            self.queue_for_batch(new_name)
+            self.refresh_list(select_index=idx)
+            self.status_var.set(f"Jahr ok, → Pending: {new_name}")
+            return
         if dest.exists():
             messagebox.showerror("Fehler", f"Ziel existiert schon:\n{dest}")
             return
@@ -654,7 +686,6 @@ class TriageApp(tk.Tk):
         self.remove_from_skip_archive(name)
         self.queue_for_batch(new_name)
         self.folders = scan_filme_folders()
-        # select the renamed folder if visible
         self.refresh_list(select_index=0)
         if new_name in self.filtered:
             idx = self.filtered.index(new_name)
@@ -722,6 +753,53 @@ class TriageApp(tk.Tk):
         self.folders = scan_filme_folders()
         self.refresh_list(select_index=self.selected_index() or 0)
         self.status_var.set(f"ratDVD → VIDEO_TS ok: {name}")
+
+    def convert_divx(self):
+        name = self.selected_name()
+        if not name:
+            return
+        folder = FILME / name
+        divxs = find_divx_files(folder)
+        if not divxs:
+            messagebox.showinfo("divx", "Keine .divx-Datei in diesem Ordner.")
+            return
+        if not DIVX_TOOL.is_file():
+            messagebox.showerror("Fehler", f"Fehlt: {DIVX_TOOL}")
+            return
+        names = "\n".join(p.name for p in divxs[:8])
+        if not messagebox.askyesno(
+            "divx → mp4",
+            f"{len(divxs)} Datei(en) nach .mp4 wandeln und .divx löschen?\n\n{names}\n\n"
+            f"(ffmpeg; kann bei großen Dateien dauern)",
+        ):
+            return
+        self.status_var.set("divx→mp4 läuft…")
+        self.update_idletasks()
+
+        def worker():
+            try:
+                proc = subprocess.run(
+                    ["python3", str(DIVX_TOOL), str(folder)],
+                    cwd=str(SCRIPT_DIR),
+                    capture_output=True,
+                    text=True,
+                )
+                out = (proc.stdout or "") + (proc.stderr or "")
+                self.after(0, lambda: self._divx_done(proc.returncode, out, name))
+            except Exception as exc:
+                self.after(0, lambda: self._divx_done(1, str(exc), name))
+
+        threading.Thread(target=worker, daemon=True).start()
+
+    def _divx_done(self, rc, out, name):
+        if rc != 0:
+            messagebox.showerror("divx→mp4 fehlgeschlagen", out[-2000:] or f"exit {rc}")
+            self.status_var.set("divx→mp4 fehlgeschlagen")
+            return
+        messagebox.showinfo("divx→mp4", f"Fertig: {name}\n\n" + (out[-800:] if out else ""))
+        self.folders = scan_filme_folders()
+        self.refresh_list(select_index=self.selected_index() or 0)
+        self.status_var.set(f"divx→mp4 ok: {name}")
 
     def mark_dvd(self):
         name = self.selected_name()
