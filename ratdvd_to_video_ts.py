@@ -73,14 +73,15 @@ def rebuild_video_ts(extract_dir: Path, out_dir: Path, rename_xvo: bool):
         dest.parent.mkdir(parents=True, exist_ok=True)
         if dest.exists():
             dest.unlink()
-        path.rename(dest)
+        # shutil.move: rename fails across devices (local /tmp → NFS).
+        shutil.move(str(path), str(dest))
         moved += 1
 
         if rename_xvo and dest.suffix.upper() == ".XVO":
             vob = dest.with_suffix(".VOB")
             if vob.exists():
                 vob.unlink()
-            dest.rename(vob)
+            shutil.move(str(dest), str(vob))
             dest = vob
 
         # Classic DVD players expect .BUP beside .IFO
