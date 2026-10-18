@@ -180,7 +180,9 @@ while true; do
       dst="$MOVIES/$new"
       if [[ -e "$src" ]]; then
         if [[ -e "$dst" ]]; then
-          echo "SKIP exists in Movies: $new"
+          # Already in Movies from an earlier run — drop Filme leftover.
+          echo "ALREADY in Movies: $new — removing Filme leftover"
+          rm -rf "$src"
         else
           mv "$src" "$MOVIES/"
           echo "MOVED: $new"
