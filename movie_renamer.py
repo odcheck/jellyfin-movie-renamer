@@ -80,7 +80,7 @@ DRY_RUN = not args.execute  # Set to False if --execute is used
 WAIT_TIME = 1  # Seconds between IMDB requests to be respectful
 VIDEO_EXTENSIONS = {
     '.mkv', '.mp4', '.avi', '.mov', '.wmv', '.flv', '.webm', '.m4v', '.m2ts', '.mts', '.ts',
-    '.mpg', '.mpeg'
+    '.mpg', '.mpeg', '.divx'
 }
 TEXT_METADATA_EXTENSIONS = {'.nfo', '.txt', '.xml'}
 MIN_MAIN_VIDEO_BYTES = 100 * 1024 * 1024
