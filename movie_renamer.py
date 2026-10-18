@@ -23,6 +23,12 @@ DEFAULT_BACKLOG_FILE = os.path.join(HOME_DIR, "backlog.txt")
 DEFAULT_SUCCESS_FILE = os.path.join(HOME_DIR, "success.txt")
 WIKIDATA_GERMAN_TITLE_CACHE = {}
 
+def soup_from_response(response):
+    """Parse HTML without BeautifulSoup UnicodeDammit warning spam."""
+    encoding = response.encoding or getattr(response, 'apparent_encoding', None) or 'utf-8'
+    text = response.content.decode(encoding, errors='replace')
+    return BeautifulSoup(text, 'html.parser')
+
 def transliterate_german(text):
     """Transliterate German umlauts and ß to ASCII equivalents"""
     transliterations = {
@@ -756,7 +762,7 @@ def fetch_imdb_movie_details(imdb_id, debug=False):
         headers['Accept-Language'] = language_header
         response = requests.get(movie_url, headers=headers, timeout=12)
         response.raise_for_status()
-        return BeautifulSoup(response.content, 'html.parser')
+        return soup_from_response(response)
 
     try:
         soup_de = fetch_soup('de-DE,de;q=0.9,en-US;q=0.8,en;q=0.7')
@@ -1000,7 +1006,7 @@ def fetch_imdb_details_from_search(imdb_id, search_terms, debug=False):
                 timeout=10
             )
             response_de.raise_for_status()
-            soup_de = BeautifulSoup(response_de.content, 'html.parser')
+            soup_de = soup_from_response(response_de)
 
             response_en = requests.get(
                 search_url,
@@ -1008,7 +1014,7 @@ def fetch_imdb_details_from_search(imdb_id, search_terms, debug=False):
                 timeout=10
             )
             response_en.raise_for_status()
-            soup_en = BeautifulSoup(response_en.content, 'html.parser')
+            soup_en = soup_from_response(response_en)
         except Exception as exc:
             if debug:
                 print(f"  Search fallback failed for IMDb ID {imdb_id} via '{search_term}': {exc}")
@@ -1433,7 +1439,7 @@ def search_imdb(
             headers = build_imdb_search_headers()
             response = requests.get(search_url, headers=headers, timeout=10)
             response.raise_for_status()
-            soup = BeautifulSoup(response.content, 'html.parser')
+            soup = soup_from_response(response)
 
             english_soup = None
             try:
@@ -1443,7 +1449,7 @@ def search_imdb(
                     timeout=10
                 )
                 response_en.raise_for_status()
-                english_soup = BeautifulSoup(response_en.content, 'html.parser')
+                english_soup = soup_from_response(response_en)
             except Exception:
                 english_soup = None
 
@@ -1730,7 +1736,7 @@ def debug_imdb_search(movie_title):
         response = requests.get(search_url, headers=headers, timeout=10)
         print(f"DEBUG: Response status: {response.status_code}")
         
-        soup = BeautifulSoup(response.content, 'html.parser')
+        soup = soup_from_response(response)
         
         # Look for different possible result structures
         results = soup.find_all('td', class_='result_text')
