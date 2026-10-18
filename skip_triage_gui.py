@@ -19,6 +19,7 @@ DVD_QUEUE = Path(os.environ.get("DVD_QUEUE", WORK / "dvd_manual.txt"))
 PENDING_FILE = Path(os.environ.get("PENDING_FILE", WORK / "pending_batch.txt"))
 SCRIPT_DIR = Path(__file__).resolve().parent
 RENAMER = SCRIPT_DIR / "movie_renamer.py"
+RATDVD_TOOL = SCRIPT_DIR / "ratdvd_to_video_ts.py"
 VIDEO_EXT = {".mkv", ".mp4", ".avi", ".mov", ".m4v", ".wmv", ".mpg", ".mpeg", ".m2ts", ".ts"}
 IGNORABLE_NAMES = {".@", "@eaDir", "Thumbs.db", "desktop.ini", ".DS_Store"}
 
@@ -85,6 +86,12 @@ def append_dvd_queue(name, note=""):
         return
     with DVD_QUEUE.open("a", encoding="utf-8") as handle:
         handle.write(f"{name} | {note}\n" if note else f"{name}\n")
+
+
+def find_ratdvds(folder: Path):
+    if not folder.is_dir():
+        return []
+    return sorted(folder.glob("*.ratDVD")) + sorted(folder.glob("*.ratdvd"))
 
 
 def has_dvd_structure(folder: Path) -> bool:
@@ -300,6 +307,7 @@ class TriageApp(tk.Tk):
         ttk.Button(btns, text="Ordner öffnen", command=self.open_folder).pack(side="left", padx=2)
         ttk.Button(btns, text="Video abspielen", command=self.play_video).pack(side="left", padx=2)
         ttk.Button(btns, text="Als DVD ablegen", command=self.mark_dvd).pack(side="left", padx=2)
+        ttk.Button(btns, text="ratDVD → VIDEO_TS", command=self.convert_ratdvd).pack(side="left", padx=2)
         ttk.Button(btns, text="Ordner löschen", command=self.delete_folder).pack(side="left", padx=2)
         ttk.Button(btns, text="Aus Skip-Liste nehmen", command=self.unskip).pack(side="left", padx=2)
         ttk.Button(btns, text="Nächster", command=self.next_item).pack(side="left", padx=2)
@@ -350,6 +358,8 @@ class TriageApp(tk.Tk):
             tags.append("FEHLT")
         elif is_effectively_empty(folder):
             tags.append("LEER")
+        if find_ratdvds(folder):
+            tags.append("ratDVD")
         if has_dvd_structure(folder):
             tags.append("DVD")
         reason = self.reasons.get(name, "").lower()
@@ -423,7 +433,10 @@ class TriageApp(tk.Tk):
         self.path_var.set(str(folder))
         is_dvd = has_dvd_structure(folder)
         multi = "multi-movie" in self.reasons.get(name, "").lower()
-        if is_dvd and multi:
+        rats = find_ratdvds(folder)
+        if rats:
+            self.dvd_var.set(f"ratDVD gefunden ({rats[0].name}) — „ratDVD → VIDEO_TS“")
+        elif is_dvd and multi:
             self.dvd_var.set("DVD erkannt — eher Multi-Movie-Set → „Als DVD ablegen“")
         elif is_dvd:
             self.dvd_var.set("DVD erkannt — Jahr setzen (→ Batch) oder „Als DVD ablegen“")
@@ -442,6 +455,8 @@ class TriageApp(tk.Tk):
         if not folder.is_dir():
             self.status_var.set("Ordner fehlt unter Filme/")
             return
+        for rat in find_ratdvds(folder):
+            self.files.insert("end", rat.name + " [ratDVD]")
         if is_dvd:
             self.files.insert("end", "(DVD-Struktur erkannt)")
             for marker in ("VIDEO_TS", "AUDIO_TS"):
@@ -528,6 +543,52 @@ class TriageApp(tk.Tk):
         self.remove_from_triage(name, select_next_from=idx)
         self.queue_for_batch(new_name)
         self.status_var.set(f"→ {new_name} · pending {len(self.pending)}")
+
+    def convert_ratdvd(self):
+        name = self.selected_name()
+        if not name:
+            return
+        folder = FILME / name
+        rats = find_ratdvds(folder)
+        if not rats:
+            messagebox.showinfo("ratDVD", "Keine .ratDVD-Datei in diesem Ordner.")
+            return
+        if not RATDVD_TOOL.is_file():
+            messagebox.showerror("Fehler", f"Fehlt: {RATDVD_TOOL}")
+            return
+        if not messagebox.askyesno(
+            "ratDVD → VIDEO_TS",
+            f"Extrahieren nach VIDEO_TS/ und .ratDVD danach löschen?\n\n"
+            f"{rats[0].name}\n\n"
+            f"(XVO→VOB, IFO→BUP; dauert bei großen Dateien)",
+        ):
+            return
+        self.status_var.set("ratDVD-Konvertierung läuft…")
+        self.update_idletasks()
+
+        def worker():
+            try:
+                proc = subprocess.run(
+                    ["python3", str(RATDVD_TOOL), str(folder)],
+                    cwd=str(SCRIPT_DIR),
+                    capture_output=True,
+                    text=True,
+                )
+                out = (proc.stdout or "") + (proc.stderr or "")
+                self.after(0, lambda: self._ratdvd_done(proc.returncode, out, name))
+            except Exception as exc:
+                self.after(0, lambda: self._ratdvd_done(1, str(exc), name))
+
+        threading.Thread(target=worker, daemon=True).start()
+
+    def _ratdvd_done(self, rc, out, name):
+        if rc != 0:
+            messagebox.showerror("ratDVD fehlgeschlagen", out[-2000:] or f"exit {rc}")
+            self.status_var.set("ratDVD fehlgeschlagen")
+            return
+        messagebox.showinfo("ratDVD", f"Fertig: {name}/VIDEO_TS\n\n" + (out[-800:] if out else ""))
+        self.on_select()
+        self.status_var.set(f"ratDVD → VIDEO_TS ok: {name}")
 
     def mark_dvd(self):
         name = self.selected_name()
