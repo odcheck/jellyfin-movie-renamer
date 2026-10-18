@@ -14,9 +14,13 @@ import argparse
 import json
 import subprocess
 import difflib
+import logging
 from bs4 import BeautifulSoup
 from urllib.parse import quote, quote_plus
 import shutil
+
+# BeautifulSoup's UnicodeDammit logs noisy replacement warnings on IMDb HTML.
+logging.getLogger('bs4.dammit').setLevel(logging.ERROR)
 
 HOME_DIR = os.path.expanduser("~")
 DEFAULT_BACKLOG_FILE = os.path.join(HOME_DIR, "backlog.txt")
@@ -25,8 +29,11 @@ WIKIDATA_GERMAN_TITLE_CACHE = {}
 
 def soup_from_response(response):
     """Parse HTML without BeautifulSoup UnicodeDammit warning spam."""
-    encoding = response.encoding or getattr(response, 'apparent_encoding', None) or 'utf-8'
-    text = response.content.decode(encoding, errors='replace')
+    # Prefer requests' already-decoded text; fall back to utf-8 replace.
+    text = response.text
+    if text is None:
+        encoding = response.encoding or 'utf-8'
+        text = response.content.decode(encoding, errors='replace')
     return BeautifulSoup(text, 'html.parser')
 
 def transliterate_german(text):
