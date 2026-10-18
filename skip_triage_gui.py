@@ -1,20 +1,24 @@
 #!/usr/bin/env python3
-"""Minimal GUI to triage permanent IMDb skips: preview, set year, mark DVD, unskip."""
+"""GUI to triage permanent IMDb skips: year, DVD, delete, pending batch with live progress."""
 import os
+import queue
 import re
 import shutil
 import subprocess
+import threading
 import tkinter as tk
 from pathlib import Path
 from tkinter import messagebox, ttk
 
 FILME = Path(os.environ.get("FILME", "/path/to/Source"))
+MOVIES = Path(os.environ.get("MOVIES", "/path/to/Destination"))
 WORK = Path(os.environ.get("WORK_DIR", Path.home() / "filme_batch_work"))
 SKIP_ARCHIVE = Path(os.environ.get("SKIP_ARCHIVE", WORK / "permanent_skipped.txt"))
 REASONS_FILE = Path(os.environ.get("REASONS_FILE", WORK / "skipped_reasons.txt"))
 DVD_QUEUE = Path(os.environ.get("DVD_QUEUE", WORK / "dvd_manual.txt"))
+PENDING_FILE = Path(os.environ.get("PENDING_FILE", WORK / "pending_batch.txt"))
 SCRIPT_DIR = Path(__file__).resolve().parent
-BATCH_SCRIPT = SCRIPT_DIR / "batch_filme_to_movies.sh"
+RENAMER = SCRIPT_DIR / "movie_renamer.py"
 VIDEO_EXT = {".mkv", ".mp4", ".avi", ".mov", ".m4v", ".wmv", ".mpg", ".mpeg", ".m2ts", ".ts"}
 IGNORABLE_NAMES = {".@", "@eaDir", "Thumbs.db", "desktop.ini", ".DS_Store"}
 
@@ -50,6 +54,22 @@ def load_skips():
 def save_skips(names):
     SKIP_ARCHIVE.parent.mkdir(parents=True, exist_ok=True)
     SKIP_ARCHIVE.write_text("".join(n + "\n" for n in names), encoding="utf-8")
+
+
+def load_pending():
+    if not PENDING_FILE.is_file():
+        return []
+    seen = []
+    for line in PENDING_FILE.read_text(encoding="utf-8", errors="ignore").splitlines():
+        name = line.strip()
+        if name and name not in seen:
+            seen.append(name)
+    return seen
+
+
+def save_pending(names):
+    WORK.mkdir(parents=True, exist_ok=True)
+    PENDING_FILE.write_text("".join(n + "\n" for n in names), encoding="utf-8")
 
 
 def append_dvd_queue(name, note=""):
@@ -102,7 +122,6 @@ def find_videos(folder: Path, limit=20):
 
 
 def is_effectively_empty(folder: Path) -> bool:
-    """True if no video/DVD/ISO — only junk/thumbs/nfo-like leftovers or nothing."""
     if not folder.is_dir():
         return True
     if has_dvd_structure(folder):
@@ -124,6 +143,90 @@ def is_effectively_empty(folder: Path) -> bool:
     return True
 
 
+def parse_movable(success_file: Path, backlog_file: Path):
+    backlog = set()
+    if backlog_file.is_file():
+        backlog = {
+            line.strip()
+            for line in backlog_file.read_text(encoding="utf-8", errors="ignore").splitlines()
+            if line.strip()
+        }
+    movable = []
+    if not success_file.is_file():
+        return movable
+    text = success_file.read_text(encoding="utf-8", errors="ignore")
+    for block in text.split("\n\n"):
+        lines = [ln for ln in block.splitlines() if ln.strip()]
+        if not lines or not lines[0].startswith("Folder: "):
+            continue
+        body = lines[0][len("Folder: "):]
+        if " -> " not in body:
+            continue
+        original, new = body.split(" -> ", 1)
+        original, new = original.strip(), new.strip()
+        if original in backlog:
+            continue
+        movable.append((original, new))
+    return movable
+
+
+class BatchProgressWindow(tk.Toplevel):
+    def __init__(self, master, titles):
+        super().__init__(master)
+        self.title(f"Batch ×{len(titles)}")
+        self.geometry("780x480")
+        self.transient(master)
+
+        self.phase_var = tk.StringVar(value="Start…")
+        self.progress = ttk.Progressbar(self, mode="determinate", maximum=max(len(titles), 1))
+        ttk.Label(self, textvariable=self.phase_var).pack(anchor="w", padx=8, pady=(8, 2))
+        self.progress.pack(fill="x", padx=8, pady=4)
+
+        frame = ttk.Frame(self)
+        frame.pack(fill="both", expand=True, padx=8, pady=4)
+        self.text = tk.Text(frame, wrap="word", height=24)
+        scroll = ttk.Scrollbar(frame, orient="vertical", command=self.text.yview)
+        self.text.configure(yscrollcommand=scroll.set)
+        self.text.pack(side="left", fill="both", expand=True)
+        scroll.pack(side="right", fill="y")
+
+        self.close_btn = ttk.Button(self, text="Schließen", command=self.destroy, state="disabled")
+        self.close_btn.pack(pady=8)
+
+        self._q = queue.Queue()
+        self.after(100, self._drain)
+
+    def log(self, line):
+        self._q.put(("log", line))
+
+    def set_phase(self, text, value=None):
+        self._q.put(("phase", text, value))
+
+    def done(self, ok, summary):
+        self._q.put(("done", ok, summary))
+
+    def _drain(self):
+        try:
+            while True:
+                item = self._q.get_nowait()
+                kind = item[0]
+                if kind == "log":
+                    self.text.insert("end", item[1] + "\n")
+                    self.text.see("end")
+                elif kind == "phase":
+                    self.phase_var.set(item[1])
+                    if item[2] is not None:
+                        self.progress["value"] = item[2]
+                elif kind == "done":
+                    self.phase_var.set(item[2])
+                    self.close_btn.configure(state="normal")
+                    if item[1]:
+                        self.progress["value"] = self.progress["maximum"]
+        except queue.Empty:
+            pass
+        self.after(100, self._drain)
+
+
 class TriageApp(tk.Tk):
     def __init__(self):
         super().__init__()
@@ -131,10 +234,12 @@ class TriageApp(tk.Tk):
         self.geometry("1000x720")
         self.reasons = load_reasons()
         self.skips = load_skips()
+        self.pending = load_pending()
         self.filtered = list(self.skips)
-        self.batch_proc = None
+        self.batch_running = False
         self._build()
         self.refresh_list(select_index=0)
+        self.update_batch_button()
 
     def _build(self):
         top = ttk.Frame(self, padding=8)
@@ -142,10 +247,11 @@ class TriageApp(tk.Tk):
         ttk.Label(top, text="Filter:").pack(side="left")
         self.filter_var = tk.StringVar()
         self.filter_var.trace_add("write", lambda *_: self.refresh_list())
-        ttk.Entry(top, textvariable=self.filter_var, width=32).pack(side="left", padx=4)
+        ttk.Entry(top, textvariable=self.filter_var, width=28).pack(side="left", padx=4)
         ttk.Button(top, text="Reload", command=self.reload_from_disk).pack(side="left", padx=4)
-        ttk.Button(top, text="Batch ×10", command=self.run_batch).pack(side="left", padx=4)
-        ttk.Label(top, text=f"Stand: {WORK.name}/").pack(side="left", padx=8)
+        self.batch_btn = ttk.Button(top, text="Batch ×0", command=self.run_batch)
+        self.batch_btn.pack(side="left", padx=4)
+        ttk.Button(top, text="Pending leeren", command=self.clear_pending).pack(side="left", padx=2)
         self.count_var = tk.StringVar()
         ttk.Label(top, textvariable=self.count_var).pack(side="right")
 
@@ -200,9 +306,9 @@ class TriageApp(tk.Tk):
 
         ttk.Label(
             detail,
-            text="DVD ablegen → dvd_manual.txt (Batch ignoriert). "
-                 "Jahr setzen / Unskip → nächster Batch. "
-                 "Löschen → Ordner weg. Fortschritt liegt in permanent_skipped.txt.",
+            text="Jahr setzen / Unskip → Pending-Batch. "
+                 "DVD ablegen / Löschen → kein Batch. "
+                 "„Batch ×N“ verarbeitet genau diese N Ordner (Live-Fenster).",
             wraplength=560,
         ).pack(anchor="w", pady=(2, 8))
 
@@ -212,6 +318,30 @@ class TriageApp(tk.Tk):
         self.files.bind("<Double-Button-1>", lambda e: self.play_selected_file())
 
         ttk.Label(detail, textvariable=self.status_var).pack(anchor="w", pady=6)
+
+    def queue_for_batch(self, folder_name):
+        """Remember a Filme folder for the next exact-size batch."""
+        if not folder_name:
+            return
+        if folder_name not in self.pending:
+            self.pending.append(folder_name)
+            save_pending(self.pending)
+        self.update_batch_button()
+
+    def clear_pending(self):
+        if not self.pending:
+            return
+        if not messagebox.askyesno("Pending leeren", f"{len(self.pending)} Einträge verwerfen?"):
+            return
+        self.pending = []
+        save_pending(self.pending)
+        self.update_batch_button()
+        self.status_var.set("Pending geleert")
+
+    def update_batch_button(self):
+        n = len(self.pending)
+        self.batch_btn.configure(text=f"Batch ×{n}", state=("normal" if n and not self.batch_running else "disabled"))
+        self.count_var.set(f"{len(self.filtered)}/{len(self.skips)} skips · pending {n}")
 
     def list_tag(self, name):
         folder = FILME / name
@@ -232,7 +362,9 @@ class TriageApp(tk.Tk):
     def reload_from_disk(self):
         self.reasons = load_reasons()
         self.skips = load_skips()
+        self.pending = load_pending()
         self.refresh_list(select_index=self.selected_index() or 0)
+        self.update_batch_button()
         self.status_var.set("Neu geladen von Disk")
 
     def refresh_list(self, select_index=None):
@@ -244,7 +376,7 @@ class TriageApp(tk.Tk):
         self.listbox.delete(0, "end")
         for name in self.filtered:
             self.listbox.insert("end", name + self.list_tag(name))
-        self.count_var.set(f"{len(self.filtered)} / {len(self.skips)} skips")
+        self.update_batch_button()
         if not self.filtered:
             self.name_var.set("")
             self.reason_var.set("")
@@ -271,7 +403,6 @@ class TriageApp(tk.Tk):
         return self.filtered[idx]
 
     def remove_from_triage(self, name, select_next_from=None):
-        """Drop from skip archive + reasons; refresh list and keep position."""
         idx = select_next_from
         if idx is None:
             idx = self.selected_index() or 0
@@ -293,11 +424,11 @@ class TriageApp(tk.Tk):
         is_dvd = has_dvd_structure(folder)
         multi = "multi-movie" in self.reasons.get(name, "").lower()
         if is_dvd and multi:
-            self.dvd_var.set("DVD erkannt (VIDEO_TS/ISO) — laut Reason eher Multi-Movie-Set")
+            self.dvd_var.set("DVD erkannt — eher Multi-Movie-Set → „Als DVD ablegen“")
         elif is_dvd:
-            self.dvd_var.set("DVD erkannt (VIDEO_TS/ISO) — Jahr setzen oder „Als DVD ablegen“")
+            self.dvd_var.set("DVD erkannt — Jahr setzen (→ Batch) oder „Als DVD ablegen“")
         elif multi:
-            self.dvd_var.set("Als Multi-Movie-DVD-Set gemeldet (Struktur ggf. prüfen)")
+            self.dvd_var.set("Als Multi-Movie-DVD-Set gemeldet")
         else:
             self.dvd_var.set("")
         m = re.search(r"\((\d{4})\)", name)
@@ -327,7 +458,7 @@ class TriageApp(tk.Tk):
             self.files.insert("end", str(rel))
         parts = []
         if is_effectively_empty(folder):
-            parts.append("LEER (löschen möglich)")
+            parts.append("LEER")
         if is_dvd:
             parts.append("DVD")
         parts.append(f"{len(videos)} Video(s)" if videos else "keine normalen Videos")
@@ -395,7 +526,8 @@ class TriageApp(tk.Tk):
             messagebox.showerror("Fehler", f"Rename fehlgeschlagen:\n{exc}")
             return
         self.remove_from_triage(name, select_next_from=idx)
-        self.status_var.set(f"Umbenannt → {new_name} — aus Liste entfernt (bereit für Batch)")
+        self.queue_for_batch(new_name)
+        self.status_var.set(f"→ {new_name} · pending {len(self.pending)}")
 
     def mark_dvd(self):
         name = self.selected_name()
@@ -410,13 +542,12 @@ class TriageApp(tk.Tk):
             note = "multi-movie DVD set"
         if not messagebox.askyesno(
             "Als DVD ablegen",
-            f"Aus Skip-Triage nehmen und nach dvd_manual.txt?\n"
-            f"Batch ignoriert diesen Ordner danach.\n\n{name}\n({note})",
+            f"Nach dvd_manual.txt (kein Batch)?\n\n{name}\n({note})",
         ):
             return
         append_dvd_queue(name, note)
         self.remove_from_triage(name, select_next_from=idx)
-        self.status_var.set(f"DVD abgelegt: {name} → {DVD_QUEUE.name}")
+        self.status_var.set(f"DVD abgelegt: {name}")
 
     def delete_folder(self):
         name = self.selected_name()
@@ -425,13 +556,13 @@ class TriageApp(tk.Tk):
         idx = self.selected_index() or 0
         folder = FILME / name
         if not folder.is_dir():
-            if messagebox.askyesno("Nur Liste", f"Ordner fehlt schon. Nur aus Skip-Liste nehmen?\n\n{name}"):
+            if messagebox.askyesno("Nur Liste", f"Ordner fehlt. Nur aus Skip-Liste?\n\n{name}"):
                 self.remove_from_triage(name, select_next_from=idx)
             return
         empty = is_effectively_empty(folder)
         warn = (
             f"Ordner LÖSCHEN?\n\n{folder}\n\n"
-            + ("Sieht leer aus (kein Video/DVD)." if empty else "WARNUNG: Enthält noch Dateien!")
+            + ("Sieht leer aus." if empty else "WARNUNG: Enthält noch Dateien!")
         )
         if not messagebox.askyesno("Ordner löschen?", warn):
             return
@@ -448,50 +579,158 @@ class TriageApp(tk.Tk):
         if not name:
             return
         idx = self.selected_index() or 0
-        if not messagebox.askyesno("Unskip", f"Aus permanent_skipped entfernen?\n\n{name}"):
-            return
-        self.remove_from_triage(name, select_next_from=idx)
-        self.status_var.set(f"Entfernt aus Skip-Liste: {name}")
-
-    def run_batch(self):
-        if self.batch_proc and self.batch_proc.poll() is None:
-            messagebox.showinfo("Batch", "Läuft bereits.")
-            return
-        if not BATCH_SCRIPT.is_file():
-            messagebox.showerror("Fehler", f"Fehlt: {BATCH_SCRIPT}")
-            return
         if not messagebox.askyesno(
-            "Batch starten",
-            "Einen Batch (10) dry-run → execute → move nach Movies starten?\n\n"
-            "GUI bleibt offen; Ausgabe im Terminal, falls von dort gestartet — "
-            "sonst Log: filme_batch_work/gui_batch.log",
+            "Unskip",
+            f"Aus permanent_skipped nehmen und in Pending-Batch?\n\n{name}",
         ):
             return
-        log_path = WORK / "gui_batch.log"
-        WORK.mkdir(parents=True, exist_ok=True)
-        log_handle = open(log_path, "a", encoding="utf-8")
-        log_handle.write("\n===== batch start =====\n")
-        log_handle.flush()
-        self.batch_proc = subprocess.Popen(
-            [str(BATCH_SCRIPT), "--once", "--batch-size", "10"],
-            cwd=str(SCRIPT_DIR),
-            stdout=log_handle,
-            stderr=subprocess.STDOUT,
-        )
-        self.status_var.set(f"Batch gestartet (pid {self.batch_proc.pid}) → {log_path}")
-        self.after(2000, self._poll_batch)
+        self.remove_from_triage(name, select_next_from=idx)
+        if (FILME / name).is_dir():
+            self.queue_for_batch(name)
+        self.status_var.set(f"Unskip → pending {len(self.pending)}")
 
-    def _poll_batch(self):
-        if not self.batch_proc:
+    def run_batch(self):
+        if self.batch_running:
+            messagebox.showinfo("Batch", "Läuft bereits.")
             return
-        rc = self.batch_proc.poll()
-        if rc is None:
-            self.after(2000, self._poll_batch)
+        # Drop pending entries whose folders vanished
+        alive = [n for n in self.pending if (FILME / n).is_dir()]
+        missing = [n for n in self.pending if n not in alive]
+        self.pending = alive
+        save_pending(self.pending)
+        self.update_batch_button()
+        if missing:
+            messagebox.showwarning("Pending", "Nicht mehr in Filme (übersprungen):\n" + "\n".join(missing[:12]))
+        if not self.pending:
+            messagebox.showinfo("Batch", "Pending ist leer.\nErst Jahr setzen oder Unskip.")
             return
-        self.status_var.set(f"Batch fertig (exit {rc}). Reload empfohlen.")
-        self.batch_proc = None
-        if messagebox.askyesno("Batch fertig", f"Exit {rc}. Skip-Liste neu laden?"):
-            self.reload_from_disk()
+        titles = list(self.pending)
+        if not messagebox.askyesno(
+            "Batch starten",
+            f"Genau {len(titles)} Ordner verarbeiten?\n\n" + "\n".join(titles[:15])
+            + ("\n…" if len(titles) > 15 else ""),
+        ):
+            return
+        if not RENAMER.is_file():
+            messagebox.showerror("Fehler", f"Fehlt: {RENAMER}")
+            return
+        if not MOVIES.is_dir():
+            messagebox.showerror("Fehler", f"Movies fehlt: {MOVIES}")
+            return
+
+        win = BatchProgressWindow(self, titles)
+        self.batch_running = True
+        self.update_batch_button()
+
+        def worker():
+            ok = False
+            summary = "Abbruch"
+            try:
+                WORK.mkdir(parents=True, exist_ok=True)
+                batch_list = WORK / "gui_pending_list.txt"
+                batch_list.write_text(
+                    "# BASE_PATH=%s\n%s\n" % (FILME, "\n".join(titles)),
+                    encoding="utf-8",
+                )
+                win.set_phase(f"Dry-run ({len(titles)})…", 0)
+                win.log("=== DRY RUN ===")
+                success = WORK / "gui_batch_success.txt"
+                backlog = WORK / "gui_batch_backlog.txt"
+                self._run_renamer(
+                    ["--input", str(batch_list),
+                     "--success-file", str(success),
+                     "--backlog-file", str(backlog)],
+                    win,
+                )
+                movable = parse_movable(success, backlog)
+                win.log(f"Movable: {len(movable)}")
+                if not movable:
+                    summary = "Keine movable Successes"
+                    win.done(False, summary)
+                    return
+
+                exec_list = WORK / "gui_pending_execute.txt"
+                exec_list.write_text(
+                    "# BASE_PATH=%s\n%s\n" % (
+                        FILME,
+                        "\n".join(orig for orig, _new in movable),
+                    ),
+                    encoding="utf-8",
+                )
+                win.set_phase(f"Execute ({len(movable)})…", 0)
+                win.log("=== EXECUTE ===")
+                success_ex = WORK / "gui_batch_success_exec.txt"
+                backlog_ex = WORK / "gui_batch_backlog_exec.txt"
+                self._run_renamer(
+                    ["--input", str(exec_list), "--execute",
+                     "--success-file", str(success_ex),
+                     "--backlog-file", str(backlog_ex)],
+                    win,
+                )
+
+                win.set_phase("Move nach Movies…", 0)
+                win.log("=== MOVE ===")
+                moved = 0
+                for i, (_orig, new) in enumerate(movable, 1):
+                    src = FILME / new
+                    dst = MOVIES / new
+                    if src.exists():
+                        if dst.exists():
+                            win.log(f"ALREADY in Movies — remove Filme leftover: {new}")
+                            shutil.rmtree(src)
+                        else:
+                            shutil.move(str(src), str(MOVIES))
+                            win.log(f"MOVED: {new}")
+                            moved += 1
+                    else:
+                        win.log(f"MISSING: {src}")
+                    win.set_phase(f"Move {i}/{len(movable)}", i)
+
+                # Drop this batch's titles from pending (persisted for resume).
+                self.pending = [n for n in load_pending() if n not in titles]
+                save_pending(self.pending)
+                ok = True
+                summary = f"Fertig — {moved} verschoben, {len(movable)} execute"
+            except Exception as exc:
+                win.log(f"ERROR: {exc}")
+                summary = f"Fehler: {exc}"
+            finally:
+                win.done(ok, summary)
+                self.after(0, self._batch_finished)
+
+        threading.Thread(target=worker, daemon=True).start()
+
+    def _run_renamer(self, extra_args, win: BatchProgressWindow):
+        cmd = ["python3", str(RENAMER), *extra_args]
+        win.log("$ " + " ".join(cmd))
+        proc = subprocess.Popen(
+            cmd,
+            cwd=str(SCRIPT_DIR),
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            text=True,
+            bufsize=1,
+        )
+        assert proc.stdout is not None
+        step = 0
+        for line in proc.stdout:
+            line = line.rstrip("\n")
+            win.log(line)
+            if line.startswith("Processing:") or line.startswith("[") and "]Processing:" in line.replace(" ", ""):
+                step += 1
+                win.set_phase(line.strip(), step)
+            elif "Processing:" in line:
+                step += 1
+                win.set_phase(line.strip()[:80], step)
+        rc = proc.wait()
+        if rc != 0:
+            raise RuntimeError(f"movie_renamer exit {rc}")
+
+    def _batch_finished(self):
+        self.batch_running = False
+        self.pending = load_pending()
+        self.update_batch_button()
+        self.status_var.set(f"Batch fertig · pending {len(self.pending)}")
 
     def next_item(self):
         sel = self.selected_index()
