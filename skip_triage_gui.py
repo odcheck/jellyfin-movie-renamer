@@ -20,7 +20,7 @@ PENDING_FILE = Path(os.environ.get("PENDING_FILE", WORK / "pending_batch.txt"))
 SCRIPT_DIR = Path(__file__).resolve().parent
 RENAMER = SCRIPT_DIR / "movie_renamer.py"
 RATDVD_TOOL = SCRIPT_DIR / "ratdvd_to_video_ts.py"
-VIDEO_EXT = {".mkv", ".mp4", ".avi", ".mov", ".m4v", ".wmv", ".mpg", ".mpeg", ".m2ts", ".ts"}
+VIDEO_EXT = {".mkv", ".mp4", ".avi", ".mov", ".m4v", ".wmv", ".mpg", ".mpeg", ".m2ts", ".ts", ".divx"}
 IGNORABLE_NAMES = {".@", "@eaDir", "Thumbs.db", "desktop.ini", ".DS_Store"}
 
 
