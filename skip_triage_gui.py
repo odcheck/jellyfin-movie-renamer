@@ -2,6 +2,7 @@
 """Minimal GUI to triage permanent IMDb skips: preview, set year, mark DVD, unskip."""
 import os
 import re
+import shutil
 import subprocess
 import tkinter as tk
 from pathlib import Path
@@ -12,7 +13,10 @@ WORK = Path(os.environ.get("WORK_DIR", Path.home() / "filme_batch_work"))
 SKIP_ARCHIVE = Path(os.environ.get("SKIP_ARCHIVE", WORK / "permanent_skipped.txt"))
 REASONS_FILE = Path(os.environ.get("REASONS_FILE", WORK / "skipped_reasons.txt"))
 DVD_QUEUE = Path(os.environ.get("DVD_QUEUE", WORK / "dvd_manual.txt"))
+SCRIPT_DIR = Path(__file__).resolve().parent
+BATCH_SCRIPT = SCRIPT_DIR / "batch_filme_to_movies.sh"
 VIDEO_EXT = {".mkv", ".mp4", ".avi", ".mov", ".m4v", ".wmv", ".mpg", ".mpeg", ".m2ts", ".ts"}
+IGNORABLE_NAMES = {".@", "@eaDir", "Thumbs.db", "desktop.ini", ".DS_Store"}
 
 
 def load_reasons():
@@ -97,14 +101,38 @@ def find_videos(folder: Path, limit=20):
     return found
 
 
+def is_effectively_empty(folder: Path) -> bool:
+    """True if no video/DVD/ISO — only junk/thumbs/nfo-like leftovers or nothing."""
+    if not folder.is_dir():
+        return True
+    if has_dvd_structure(folder):
+        return False
+    if find_videos(folder, limit=1):
+        return False
+    try:
+        for root, dirs, files in os.walk(folder):
+            dirs[:] = [d for d in dirs if not d.startswith(".") and not d.startswith("@")]
+            for name in files:
+                lower = name.lower()
+                if lower.endswith((".nfo", ".txt", ".sfv", ".jpg", ".png", ".jpeg", ".xml")):
+                    continue
+                if name in IGNORABLE_NAMES or name.startswith("."):
+                    continue
+                return False
+    except OSError:
+        return False
+    return True
+
+
 class TriageApp(tk.Tk):
     def __init__(self):
         super().__init__()
         self.title("Filme skip triage")
-        self.geometry("980x680")
+        self.geometry("1000x720")
         self.reasons = load_reasons()
         self.skips = load_skips()
         self.filtered = list(self.skips)
+        self.batch_proc = None
         self._build()
         self.refresh_list(select_index=0)
 
@@ -114,8 +142,10 @@ class TriageApp(tk.Tk):
         ttk.Label(top, text="Filter:").pack(side="left")
         self.filter_var = tk.StringVar()
         self.filter_var.trace_add("write", lambda *_: self.refresh_list())
-        ttk.Entry(top, textvariable=self.filter_var, width=40).pack(side="left", padx=4)
-        ttk.Label(top, text=f"Filme: {FILME}").pack(side="left", padx=12)
+        ttk.Entry(top, textvariable=self.filter_var, width=32).pack(side="left", padx=4)
+        ttk.Button(top, text="Reload", command=self.reload_from_disk).pack(side="left", padx=4)
+        ttk.Button(top, text="Batch ×10", command=self.run_batch).pack(side="left", padx=4)
+        ttk.Label(top, text=f"Stand: {WORK.name}/").pack(side="left", padx=8)
         self.count_var = tk.StringVar()
         ttk.Label(top, textvariable=self.count_var).pack(side="right")
 
@@ -164,12 +194,15 @@ class TriageApp(tk.Tk):
         ttk.Button(btns, text="Ordner öffnen", command=self.open_folder).pack(side="left", padx=2)
         ttk.Button(btns, text="Video abspielen", command=self.play_video).pack(side="left", padx=2)
         ttk.Button(btns, text="Als DVD ablegen", command=self.mark_dvd).pack(side="left", padx=2)
+        ttk.Button(btns, text="Ordner löschen", command=self.delete_folder).pack(side="left", padx=2)
         ttk.Button(btns, text="Aus Skip-Liste nehmen", command=self.unskip).pack(side="left", padx=2)
         ttk.Button(btns, text="Nächster", command=self.next_item).pack(side="left", padx=2)
 
         ttk.Label(
             detail,
-            text="„Als DVD ablegen“ → dvd_manual.txt, weg aus dieser Liste (manuell später).",
+            text="DVD ablegen → dvd_manual.txt (Batch ignoriert). "
+                 "Jahr setzen / Unskip → nächster Batch. "
+                 "Löschen → Ordner weg. Fortschritt liegt in permanent_skipped.txt.",
             wraplength=560,
         ).pack(anchor="w", pady=(2, 8))
 
@@ -183,6 +216,10 @@ class TriageApp(tk.Tk):
     def list_tag(self, name):
         folder = FILME / name
         tags = []
+        if not folder.is_dir():
+            tags.append("FEHLT")
+        elif is_effectively_empty(folder):
+            tags.append("LEER")
         if has_dvd_structure(folder):
             tags.append("DVD")
         reason = self.reasons.get(name, "").lower()
@@ -191,6 +228,12 @@ class TriageApp(tk.Tk):
         if not tags:
             return ""
         return " [" + ", ".join(tags) + "]"
+
+    def reload_from_disk(self):
+        self.reasons = load_reasons()
+        self.skips = load_skips()
+        self.refresh_list(select_index=self.selected_index() or 0)
+        self.status_var.set("Neu geladen von Disk")
 
     def refresh_list(self, select_index=None):
         needle = self.filter_var.get().strip().lower()
@@ -283,6 +326,8 @@ class TriageApp(tk.Tk):
                 rel = path.name
             self.files.insert("end", str(rel))
         parts = []
+        if is_effectively_empty(folder):
+            parts.append("LEER (löschen möglich)")
         if is_dvd:
             parts.append("DVD")
         parts.append(f"{len(videos)} Video(s)" if videos else "keine normalen Videos")
@@ -365,12 +410,38 @@ class TriageApp(tk.Tk):
             note = "multi-movie DVD set"
         if not messagebox.askyesno(
             "Als DVD ablegen",
-            f"Aus Skip-Triage nehmen und nach dvd_manual.txt?\n\n{name}\n({note})",
+            f"Aus Skip-Triage nehmen und nach dvd_manual.txt?\n"
+            f"Batch ignoriert diesen Ordner danach.\n\n{name}\n({note})",
         ):
             return
         append_dvd_queue(name, note)
         self.remove_from_triage(name, select_next_from=idx)
         self.status_var.set(f"DVD abgelegt: {name} → {DVD_QUEUE.name}")
+
+    def delete_folder(self):
+        name = self.selected_name()
+        if not name:
+            return
+        idx = self.selected_index() or 0
+        folder = FILME / name
+        if not folder.is_dir():
+            if messagebox.askyesno("Nur Liste", f"Ordner fehlt schon. Nur aus Skip-Liste nehmen?\n\n{name}"):
+                self.remove_from_triage(name, select_next_from=idx)
+            return
+        empty = is_effectively_empty(folder)
+        warn = (
+            f"Ordner LÖSCHEN?\n\n{folder}\n\n"
+            + ("Sieht leer aus (kein Video/DVD)." if empty else "WARNUNG: Enthält noch Dateien!")
+        )
+        if not messagebox.askyesno("Ordner löschen?", warn):
+            return
+        try:
+            shutil.rmtree(folder)
+        except OSError as exc:
+            messagebox.showerror("Fehler", f"Löschen fehlgeschlagen:\n{exc}")
+            return
+        self.remove_from_triage(name, select_next_from=idx)
+        self.status_var.set(f"Gelöscht: {name}")
 
     def unskip(self):
         name = self.selected_name()
@@ -381,6 +452,46 @@ class TriageApp(tk.Tk):
             return
         self.remove_from_triage(name, select_next_from=idx)
         self.status_var.set(f"Entfernt aus Skip-Liste: {name}")
+
+    def run_batch(self):
+        if self.batch_proc and self.batch_proc.poll() is None:
+            messagebox.showinfo("Batch", "Läuft bereits.")
+            return
+        if not BATCH_SCRIPT.is_file():
+            messagebox.showerror("Fehler", f"Fehlt: {BATCH_SCRIPT}")
+            return
+        if not messagebox.askyesno(
+            "Batch starten",
+            "Einen Batch (10) dry-run → execute → move nach Movies starten?\n\n"
+            "GUI bleibt offen; Ausgabe im Terminal, falls von dort gestartet — "
+            "sonst Log: filme_batch_work/gui_batch.log",
+        ):
+            return
+        log_path = WORK / "gui_batch.log"
+        WORK.mkdir(parents=True, exist_ok=True)
+        log_handle = open(log_path, "a", encoding="utf-8")
+        log_handle.write("\n===== batch start =====\n")
+        log_handle.flush()
+        self.batch_proc = subprocess.Popen(
+            [str(BATCH_SCRIPT), "--once", "--batch-size", "10"],
+            cwd=str(SCRIPT_DIR),
+            stdout=log_handle,
+            stderr=subprocess.STDOUT,
+        )
+        self.status_var.set(f"Batch gestartet (pid {self.batch_proc.pid}) → {log_path}")
+        self.after(2000, self._poll_batch)
+
+    def _poll_batch(self):
+        if not self.batch_proc:
+            return
+        rc = self.batch_proc.poll()
+        if rc is None:
+            self.after(2000, self._poll_batch)
+            return
+        self.status_var.set(f"Batch fertig (exit {rc}). Reload empfohlen.")
+        self.batch_proc = None
+        if messagebox.askyesno("Batch fertig", f"Exit {rc}. Skip-Liste neu laden?"):
+            self.reload_from_disk()
 
     def next_item(self):
         sel = self.selected_index()

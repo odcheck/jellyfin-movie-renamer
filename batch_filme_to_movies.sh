@@ -10,6 +10,7 @@ MOVIES="${MOVIES:-/path/to/Destination}"
 WORK="${WORK_DIR:-$HOME/filme_batch_work}"
 RENAMER="$(cd "$(dirname "$0")" && pwd)/movie_renamer.py"
 SKIP_ARCHIVE="$WORK/permanent_skipped.txt"
+DVD_QUEUE="$WORK/dvd_manual.txt"
 ONCE=0
 
 while [[ $# -gt 0 ]]; do
@@ -47,23 +48,33 @@ build_batch_list() {
   python3 "$RENAMER" --generate-inputfile-from="$FILME" --fileoutput="$WORK"
   local full="$WORK/movielist.txt"
   local out="$WORK/batch_list.txt"
-  eval "$(python3 - "$full" "$SKIP_ARCHIVE" "$out" "$FILME" "$BATCH_SIZE" <<'PY'
+  touch "$DVD_QUEUE"
+  eval "$(python3 - "$full" "$SKIP_ARCHIVE" "$DVD_QUEUE" "$out" "$FILME" "$BATCH_SIZE" <<'PY'
 import sys
 from pathlib import Path
 
-full, skip_path, out_path, filme, batch_size = sys.argv[1:6]
+full, skip_path, dvd_path, out_path, filme, batch_size = sys.argv[1:7]
 batch_size = int(batch_size)
-skips = {
-    line.strip()
-    for line in Path(skip_path).read_text(encoding="utf-8", errors="ignore").splitlines()
-    if line.strip()
-}
+
+def load_names(path):
+    p = Path(path)
+    if not p.is_file():
+        return set()
+    names = set()
+    for line in p.read_text(encoding="utf-8", errors="ignore").splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        names.add(line.split(" | ", 1)[0].strip())
+    return names
+
+ignore = load_names(skip_path) | load_names(dvd_path)
 names = []
 for line in Path(full).read_text(encoding="utf-8", errors="ignore").splitlines():
     name = line.strip()
     if not name or name.startswith("#"):
         continue
-    if name in skips:
+    if name in ignore:
         continue
     names.append(name)
 
