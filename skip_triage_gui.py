@@ -245,6 +245,7 @@ class TriageApp(tk.Tk):
         self.filtered = list(self.skips)
         self.batch_running = False
         self._build()
+        self.prune_stale_skips()
         self.refresh_list(select_index=0)
         self.update_batch_button()
 
@@ -369,13 +370,36 @@ class TriageApp(tk.Tk):
             return ""
         return " [" + ", ".join(tags) + "]"
 
+    def prune_stale_skips(self):
+        """Remove skip/pending entries whose folders no longer exist under Filme/."""
+        stale = [n for n in self.skips if not (FILME / n).is_dir()]
+        if stale:
+            self.skips = [n for n in self.skips if n not in stale]
+            save_skips(self.skips)
+            for name in stale:
+                self.reasons.pop(name, None)
+            save_reasons(self.reasons)
+        stale_pending = [n for n in self.pending if not (FILME / n).is_dir()]
+        if stale_pending:
+            self.pending = [n for n in self.pending if n not in stale_pending]
+            save_pending(self.pending)
+        return stale, stale_pending
+
     def reload_from_disk(self):
         self.reasons = load_reasons()
         self.skips = load_skips()
         self.pending = load_pending()
-        self.refresh_list(select_index=self.selected_index() or 0)
+        stale, stale_pending = self.prune_stale_skips()
+        self.refresh_list(select_index=0)
         self.update_batch_button()
-        self.status_var.set("Neu geladen von Disk")
+        msg = "Neu geladen"
+        if stale:
+            msg += f" · {len(stale)} Skip(s) entfernt (Ordner weg): " + ", ".join(stale[:5])
+            if len(stale) > 5:
+                msg += "…"
+        if stale_pending:
+            msg += f" · {len(stale_pending)} Pending entfernt"
+        self.status_var.set(msg)
 
     def refresh_list(self, select_index=None):
         needle = self.filter_var.get().strip().lower()
@@ -393,6 +417,7 @@ class TriageApp(tk.Tk):
             self.path_var.set("")
             self.dvd_var.set("")
             self.files.delete(0, "end")
+            self.status_var.set("Keine Skips mehr in der Liste")
             return
         if select_index is None:
             return
