@@ -2341,42 +2341,40 @@ def main():
     print(f"Added to backlog (no videos): {backlog_count}")
     print(f"Total: {len(movies_to_process)}")
 
-    # Write success file for successfully processed movies
-    if success_movies:
-        try:
-            with open(args.success_file, 'w') as f:
-                for item in success_movies:
-                    f.write(f"Folder: {item['original_folder']} -> {item['new_folder']}\n")
-                    if item['video_moves']:
-                        for old_name, new_name in item['video_moves']:
-                            f.write(f"Video: {old_name} -> {new_name}\n")
-                    else:
-                        f.write("Video: none found\n")
-                    f.write("\n")
-            print(f"Success list written to: {args.success_file} ({len(success_movies)} entries)")
-        except Exception as e:
-            print(f"Error writing success file: {e}")
-    
-    # Write backlog file for movies without video files
-    if backlog_movies:
-        try:
-            with open(args.backlog_file, 'w') as f:
-                for movie in backlog_movies:
-                    f.write(movie + '\n')
+    # Always rewrite output files so a zero-success run cannot leave stale entries
+    # for the next GUI/batch step (e.g. Masterblaster from a previous dry-run).
+    try:
+        with open(args.success_file, 'w') as f:
+            for item in success_movies:
+                f.write(f"Folder: {item['original_folder']} -> {item['new_folder']}\n")
+                if item['video_moves']:
+                    for old_name, new_name in item['video_moves']:
+                        f.write(f"Video: {old_name} -> {new_name}\n")
+                else:
+                    f.write("Video: none found\n")
+                f.write("\n")
+        print(f"Success list written to: {args.success_file} ({len(success_movies)} entries)")
+    except Exception as e:
+        print(f"Error writing success file: {e}")
+
+    try:
+        with open(args.backlog_file, 'w') as f:
+            for movie in backlog_movies:
+                f.write(movie + '\n')
+        if backlog_movies:
             print(f"\nBacklog written to: {args.backlog_file} ({len(backlog_movies)} entries - no video files found)")
-        except Exception as e:
-            print(f"Error writing backlog file: {e}")
-    
-    # Write skipped file for IMDB lookup failures
-    if skipped_movies:
-        try:
-            skipped_file = derive_related_output_path(args.backlog_file, '_skipped')
-            with open(skipped_file, 'w') as f:
-                for item in skipped_movies:
-                    f.write(f"{item['folder']} | {item['reason']}\n")
+    except Exception as e:
+        print(f"Error writing backlog file: {e}")
+
+    try:
+        skipped_file = derive_related_output_path(args.backlog_file, '_skipped')
+        with open(skipped_file, 'w') as f:
+            for item in skipped_movies:
+                f.write(f"{item['folder']} | {item['reason']}\n")
+        if skipped_movies:
             print(f"Skipped movies written to: {skipped_file} ({len(skipped_movies)} entries - IMDB lookup failed)")
-        except Exception as e:
-            print(f"Error writing skipped file: {e}")
+    except Exception as e:
+        print(f"Error writing skipped file: {e}")
     
     if DRY_RUN:
         print(f"\n⚠️  This was a DRY RUN - no files were actually renamed")

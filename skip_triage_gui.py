@@ -919,6 +919,9 @@ class TriageApp(tk.Tk):
                 win.log("=== DRY RUN ===")
                 success = WORK / "gui_batch_success.txt"
                 backlog = WORK / "gui_batch_backlog.txt"
+                # Clear stale outputs from previous batches before parsing.
+                for path in (success, backlog, WORK / "gui_batch_backlog_skipped.txt"):
+                    path.write_text("", encoding="utf-8")
                 self._run_renamer(
                     ["--input", str(batch_list),
                      "--success-file", str(success),
