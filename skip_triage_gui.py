@@ -337,27 +337,23 @@ class TriageApp(tk.Tk):
         ttk.Label(detail, textvariable=self.reason_var, wraplength=560).pack(anchor="w", pady=(4, 8))
         ttk.Label(detail, textvariable=self.path_var, wraplength=560).pack(anchor="w")
 
-        year_row = ttk.Frame(detail)
-        year_row.pack(fill="x", pady=8)
-        ttk.Label(year_row, text="Jahr:").pack(side="left")
+        meta_row = ttk.Frame(detail)
+        meta_row.pack(fill="x", pady=8)
+        ttk.Label(meta_row, text="Jahr:").pack(side="left")
         self.year_var = tk.StringVar()
-        year_entry = ttk.Entry(year_row, textvariable=self.year_var, width=8)
+        year_entry = ttk.Entry(meta_row, textvariable=self.year_var, width=8)
         year_entry.pack(side="left", padx=4)
-        year_entry.bind("<Return>", lambda _e: self.apply_year())
-        ttk.Button(year_row, text="Jahr setzen → Pending", command=self.apply_year).pack(
-            side="left", padx=4
-        )
-
-        id_row = ttk.Frame(detail)
-        id_row.pack(fill="x", pady=4)
-        ttk.Label(id_row, text="IMDb:").pack(side="left")
+        ttk.Label(meta_row, text="IMDb:").pack(side="left", padx=(8, 0))
         self.imdb_var = tk.StringVar()
-        id_entry = ttk.Entry(id_row, textvariable=self.imdb_var, width=14)
+        id_entry = ttk.Entry(meta_row, textvariable=self.imdb_var, width=14)
         id_entry.pack(side="left", padx=4)
-        id_entry.bind("<Return>", lambda _e: self.apply_imdb_id())
-        ttk.Button(id_row, text="IMDb-ID setzen → Pending", command=self.apply_imdb_id).pack(
-            side="left", padx=4
-        )
+        year_entry.bind("<Return>", lambda _e: self.apply_year_and_or_imdb())
+        id_entry.bind("<Return>", lambda _e: self.apply_year_and_or_imdb())
+        ttk.Button(
+            meta_row,
+            text="Setzen → Pending",
+            command=self.apply_year_and_or_imdb,
+        ).pack(side="left", padx=4)
 
         btns = ttk.Frame(detail)
         btns.pack(fill="x", pady=4)
@@ -374,8 +370,7 @@ class TriageApp(tk.Tk):
         ttk.Label(
             detail,
             text="Liste = alle Ordner in Filme/ (Rescan). "
-                 "Tags: SKIP / READY / PENDING / DVD. "
-                 "Jahr oder „→ Pending“ → Batch ×N.",
+                 "Jahr und/oder IMDb setzen (eins oder beides) → Pending → Batch ×N.",
             wraplength=560,
         ).pack(anchor="w", pady=(2, 8))
 
@@ -680,39 +675,73 @@ class TriageApp(tk.Tk):
         if path.is_file():
             subprocess.Popen(["xdg-open", str(path)])
 
-    def apply_year(self):
+    def apply_year_and_or_imdb(self):
+        """Apply year and/or IMDb ID (either or both), then queue for batch."""
         name = self.selected_name()
         if not name:
-            return
-        idx = self.selected_index() or 0
-        year = self.year_var.get().strip()
-        if not re.fullmatch(r"19\d{2}|20\d{2}", year):
-            messagebox.showerror("Fehler", "Jahr muss 19xx/20xx sein")
             return
         folder = FILME / name
         if not folder.is_dir():
             messagebox.showerror("Fehler", f"Ordner fehlt:\n{folder}")
             return
-        base = re.sub(r"\s*\(\d{4}\)\s*$", "", name).strip()
-        base = re.sub(r"[_\s.-](19\d{2}|20\d{2})$", "", base).strip()
-        new_name = f"{base} ({year})"
-        dest = FILME / new_name
-        # Same path (already "Title (year)") → just queue for batch.
-        if dest.resolve() == folder.resolve():
-            self.remove_from_skip_archive(name)
-            self.queue_for_batch(new_name)
-            self.refresh_list(select_index=idx)
-            self.status_var.set(f"Jahr ok, → Pending: {new_name}")
+
+        year = self.year_var.get().strip()
+        imdb_raw = self.imdb_var.get().strip()
+        imdb_id = None
+        if imdb_raw:
+            m = re.search(r"(tt\d{7,9})", imdb_raw, flags=re.IGNORECASE)
+            if not m:
+                messagebox.showerror("Fehler", "IMDb-ID erwartet, z.B. tt0089563")
+                return
+            imdb_id = m.group(1).lower()
+
+        if year and not re.fullmatch(r"19\d{2}|20\d{2}", year):
+            messagebox.showerror("Fehler", "Jahr muss 19xx/20xx sein (oder leer lassen)")
             return
-        if dest.exists():
-            messagebox.showerror("Fehler", f"Ziel existiert schon:\n{dest}")
+        if not year and not imdb_id:
+            messagebox.showerror("Fehler", "Jahr und/oder IMDb-ID eintragen")
             return
-        try:
-            folder.rename(dest)
-        except OSError as exc:
-            messagebox.showerror("Fehler", f"Rename fehlgeschlagen:\n{exc}")
-            return
+
+        new_name = name
+        notes = []
+
+        if year:
+            base = re.sub(r"\s*\(\d{4}\)\s*$", "", name).strip()
+            base = re.sub(r"[_\s.-](19\d{2}|20\d{2})$", "", base).strip()
+            new_name = f"{base} ({year})"
+            dest = FILME / new_name
+            if dest.resolve() != folder.resolve():
+                if dest.exists():
+                    messagebox.showerror("Fehler", f"Ziel existiert schon:\n{dest}")
+                    return
+                try:
+                    folder.rename(dest)
+                except OSError as exc:
+                    messagebox.showerror("Fehler", f"Rename fehlgeschlagen:\n{exc}")
+                    return
+                folder = dest
+                notes.append(f"Jahr→{new_name}")
+            else:
+                notes.append(f"Jahr ok ({year})")
+
+        if imdb_id:
+            nfo = folder / "movie.nfo"
+            try:
+                nfo.write_text(
+                    f"<movie>\n  <title>{new_name}</title>\n  <imdbid>{imdb_id}</imdbid>\n"
+                    f"  <uniqueid type=\"imdb\">{imdb_id}</uniqueid>\n"
+                    + (f"  <year>{year}</year>\n" if year else "")
+                    + "</movie>\n",
+                    encoding="utf-8",
+                )
+            except OSError as exc:
+                messagebox.showerror("Fehler", f"Konnte movie.nfo nicht schreiben:\n{exc}")
+                return
+            notes.append(f"IMDb {imdb_id}")
+
         self.remove_from_skip_archive(name)
+        if new_name != name:
+            self.remove_from_skip_archive(new_name)
         self.queue_for_batch(new_name)
         self.folders = scan_filme_folders()
         self.refresh_list(select_index=0)
@@ -722,7 +751,7 @@ class TriageApp(tk.Tk):
             self.listbox.selection_set(idx)
             self.listbox.see(idx)
             self.on_select()
-        self.status_var.set(f"→ {new_name} · pending {len(self.pending)}")
+        self.status_var.set(" · ".join(notes) + f" · Pending {len(self.pending)}")
 
     def add_to_pending(self):
         name = self.selected_name()
@@ -735,36 +764,6 @@ class TriageApp(tk.Tk):
         self.queue_for_batch(name)
         self.refresh_list(select_index=self.selected_index() or 0)
         self.status_var.set(f"→ Pending: {name} ({len(self.pending)})")
-
-    def apply_imdb_id(self):
-        """Write tt… into movie.nfo so the renamer uses it authoritatively."""
-        name = self.selected_name()
-        if not name:
-            return
-        folder = FILME / name
-        if not folder.is_dir():
-            messagebox.showerror("Fehler", f"Ordner fehlt:\n{folder}")
-            return
-        raw = self.imdb_var.get().strip()
-        m = re.search(r"(tt\d{7,9})", raw, flags=re.IGNORECASE)
-        if not m:
-            messagebox.showerror("Fehler", "IMDb-ID erwartet, z.B. tt0089563")
-            return
-        imdb_id = m.group(1).lower()
-        nfo = folder / "movie.nfo"
-        try:
-            nfo.write_text(
-                f"<movie>\n  <title>{name}</title>\n  <imdbid>{imdb_id}</imdbid>\n"
-                f"  <uniqueid type=\"imdb\">{imdb_id}</uniqueid>\n</movie>\n",
-                encoding="utf-8",
-            )
-        except OSError as exc:
-            messagebox.showerror("Fehler", f"Konnte movie.nfo nicht schreiben:\n{exc}")
-            return
-        self.remove_from_skip_archive(name)
-        self.queue_for_batch(name)
-        self.refresh_list(select_index=self.selected_index() or 0)
-        self.status_var.set(f"IMDb {imdb_id} → {nfo.name} · Pending {len(self.pending)}")
 
     def convert_ratdvd(self):
         name = self.selected_name()
