@@ -73,19 +73,37 @@ def save_pending(names):
     PENDING_FILE.write_text("".join(n + "\n" for n in names), encoding="utf-8")
 
 
+def load_dvd_queue_names():
+    if not DVD_QUEUE.is_file():
+        return set()
+    return {
+        line.split(" | ", 1)[0].strip()
+        for line in DVD_QUEUE.read_text(encoding="utf-8", errors="ignore").splitlines()
+        if line.strip()
+    }
+
+
 def append_dvd_queue(name, note=""):
     DVD_QUEUE.parent.mkdir(parents=True, exist_ok=True)
-    existing = set()
-    if DVD_QUEUE.is_file():
-        existing = {
-            line.split(" | ", 1)[0].strip()
-            for line in DVD_QUEUE.read_text(encoding="utf-8", errors="ignore").splitlines()
-            if line.strip()
-        }
+    existing = load_dvd_queue_names()
     if name in existing:
         return
     with DVD_QUEUE.open("a", encoding="utf-8") as handle:
         handle.write(f"{name} | {note}\n" if note else f"{name}\n")
+
+
+def scan_filme_folders():
+    """All movie folders still under Filme/ (source of truth for the left list)."""
+    if not FILME.is_dir():
+        return []
+    names = []
+    for path in sorted(FILME.iterdir(), key=lambda p: p.name.lower()):
+        if not path.is_dir():
+            continue
+        if path.name.startswith(".") or path.name.startswith("@"):
+            continue
+        names.append(path.name)
+    return names
 
 
 def find_ratdvds(folder: Path):
@@ -237,17 +255,20 @@ class BatchProgressWindow(tk.Toplevel):
 class TriageApp(tk.Tk):
     def __init__(self):
         super().__init__()
-        self.title("Filme skip triage")
+        self.title("Filme triage")
         self.geometry("1000x720")
         self.reasons = load_reasons()
         self.skips = load_skips()
+        self.skip_set = set(self.skips)
         self.pending = load_pending()
-        self.filtered = list(self.skips)
+        self.dvd_parked = load_dvd_queue_names()
+        self.folders = scan_filme_folders()
+        self.filtered = list(self.folders)
+        self.view_mode = tk.StringVar(value="Alle")
         self.batch_running = False
         self._build()
         self.prune_stale_skips()
-        self.refresh_list(select_index=0)
-        self.update_batch_button()
+        self.rescan_filme(select_index=0)
 
     def _build(self):
         top = ttk.Frame(self, padding=8)
@@ -255,8 +276,18 @@ class TriageApp(tk.Tk):
         ttk.Label(top, text="Filter:").pack(side="left")
         self.filter_var = tk.StringVar()
         self.filter_var.trace_add("write", lambda *_: self.refresh_list())
-        ttk.Entry(top, textvariable=self.filter_var, width=28).pack(side="left", padx=4)
-        ttk.Button(top, text="Reload", command=self.reload_from_disk).pack(side="left", padx=4)
+        ttk.Entry(top, textvariable=self.filter_var, width=22).pack(side="left", padx=4)
+        ttk.Label(top, text="Ansicht:").pack(side="left")
+        view = ttk.Combobox(
+            top,
+            textvariable=self.view_mode,
+            values=("Alle", "Skip", "Ready", "Pending", "DVD/ratDVD", "Leer"),
+            width=11,
+            state="readonly",
+        )
+        view.pack(side="left", padx=4)
+        view.bind("<<ComboboxSelected>>", lambda _e: self.refresh_list(select_index=0))
+        ttk.Button(top, text="Rescan Filme", command=self.rescan_filme).pack(side="left", padx=4)
         self.batch_btn = ttk.Button(top, text="Batch ×0", command=self.run_batch)
         self.batch_btn.pack(side="left", padx=4)
         ttk.Button(top, text="Pending leeren", command=self.clear_pending).pack(side="left", padx=2)
@@ -299,7 +330,7 @@ class TriageApp(tk.Tk):
         year_entry = ttk.Entry(year_row, textvariable=self.year_var, width=8)
         year_entry.pack(side="left", padx=4)
         year_entry.bind("<Return>", lambda _e: self.apply_year())
-        ttk.Button(year_row, text="Jahr setzen & aus Liste", command=self.apply_year).pack(
+        ttk.Button(year_row, text="Jahr setzen → Pending", command=self.apply_year).pack(
             side="left", padx=4
         )
 
@@ -307,17 +338,18 @@ class TriageApp(tk.Tk):
         btns.pack(fill="x", pady=4)
         ttk.Button(btns, text="Ordner öffnen", command=self.open_folder).pack(side="left", padx=2)
         ttk.Button(btns, text="Video abspielen", command=self.play_video).pack(side="left", padx=2)
+        ttk.Button(btns, text="→ Pending", command=self.add_to_pending).pack(side="left", padx=2)
         ttk.Button(btns, text="Als DVD ablegen", command=self.mark_dvd).pack(side="left", padx=2)
         ttk.Button(btns, text="ratDVD → VIDEO_TS", command=self.convert_ratdvd).pack(side="left", padx=2)
         ttk.Button(btns, text="Ordner löschen", command=self.delete_folder).pack(side="left", padx=2)
-        ttk.Button(btns, text="Aus Skip-Liste nehmen", command=self.unskip).pack(side="left", padx=2)
+        ttk.Button(btns, text="Unskip", command=self.unskip).pack(side="left", padx=2)
         ttk.Button(btns, text="Nächster", command=self.next_item).pack(side="left", padx=2)
 
         ttk.Label(
             detail,
-            text="Jahr setzen / Unskip → Pending-Batch. "
-                 "DVD ablegen / Löschen → kein Batch. "
-                 "„Batch ×N“ verarbeitet genau diese N Ordner (Live-Fenster).",
+            text="Liste = alle Ordner in Filme/ (Rescan). "
+                 "Tags: SKIP / READY / PENDING / DVD. "
+                 "Jahr oder „→ Pending“ → Batch ×N.",
             wraplength=560,
         ).pack(anchor="w", pady=(2, 8))
 
@@ -349,12 +381,27 @@ class TriageApp(tk.Tk):
 
     def update_batch_button(self):
         n = len(self.pending)
-        self.batch_btn.configure(text=f"Batch ×{n}", state=("normal" if n and not self.batch_running else "disabled"))
-        self.count_var.set(f"{len(self.filtered)}/{len(self.skips)} skips · pending {n}")
+        self.batch_btn.configure(
+            text=f"Batch ×{n}",
+            state=("normal" if n and not self.batch_running else "disabled"),
+        )
+        skip_n = sum(1 for n in self.folders if n in self.skip_set)
+        self.count_var.set(
+            f"{len(self.filtered)}/{len(self.folders)} Ordner · "
+            f"{skip_n} skip · pending {n}"
+        )
 
     def list_tag(self, name):
         folder = FILME / name
         tags = []
+        if name in self.pending:
+            tags.append("PENDING")
+        if name in self.dvd_parked:
+            tags.append("GEPARKT")
+        if name in self.skip_set:
+            tags.append("SKIP")
+        elif name not in self.pending and name not in self.dvd_parked:
+            tags.append("READY")
         if not folder.is_dir():
             tags.append("FEHLT")
         elif is_effectively_empty(folder):
@@ -366,15 +413,31 @@ class TriageApp(tk.Tk):
         reason = self.reasons.get(name, "").lower()
         if "multi-movie" in reason:
             tags.append("DVD-SET")
-        if not tags:
-            return ""
-        return " [" + ", ".join(tags) + "]"
+        return " [" + ", ".join(tags) + "]" if tags else ""
+
+    def matches_view(self, name):
+        mode = self.view_mode.get()
+        folder = FILME / name
+        if mode == "Alle":
+            return True
+        if mode == "Skip":
+            return name in self.skip_set
+        if mode == "Ready":
+            return name not in self.skip_set and name not in self.dvd_parked
+        if mode == "Pending":
+            return name in self.pending
+        if mode == "DVD/ratDVD":
+            return bool(find_ratdvds(folder) or has_dvd_structure(folder) or name in self.dvd_parked)
+        if mode == "Leer":
+            return is_effectively_empty(folder)
+        return True
 
     def prune_stale_skips(self):
         """Remove skip/pending entries whose folders no longer exist under Filme/."""
         stale = [n for n in self.skips if not (FILME / n).is_dir()]
         if stale:
             self.skips = [n for n in self.skips if n not in stale]
+            self.skip_set = set(self.skips)
             save_skips(self.skips)
             for name in stale:
                 self.reasons.pop(name, None)
@@ -385,28 +448,35 @@ class TriageApp(tk.Tk):
             save_pending(self.pending)
         return stale, stale_pending
 
-    def reload_from_disk(self):
+    def rescan_filme(self, select_index=0):
+        """Rescan Filme/ + reload archives — left list shows all folders."""
         self.reasons = load_reasons()
         self.skips = load_skips()
+        self.skip_set = set(self.skips)
         self.pending = load_pending()
+        self.dvd_parked = load_dvd_queue_names()
         stale, stale_pending = self.prune_stale_skips()
-        self.refresh_list(select_index=0)
-        self.update_batch_button()
-        msg = "Neu geladen"
+        self.folders = scan_filme_folders()
+        self.refresh_list(select_index=select_index)
+        msg = f"Rescan: {len(self.folders)} Ordner in Filme/"
         if stale:
-            msg += f" · {len(stale)} Skip(s) entfernt (Ordner weg): " + ", ".join(stale[:5])
-            if len(stale) > 5:
-                msg += "…"
+            msg += f" · {len(stale)} tote Skips entfernt"
         if stale_pending:
             msg += f" · {len(stale_pending)} Pending entfernt"
         self.status_var.set(msg)
 
+    def reload_from_disk(self):
+        self.rescan_filme(select_index=0)
+
     def refresh_list(self, select_index=None):
         needle = self.filter_var.get().strip().lower()
-        self.filtered = [
-            n for n in self.skips
-            if not needle or needle in n.lower() or needle in self.reasons.get(n, "").lower()
-        ]
+        self.filtered = []
+        for name in self.folders:
+            if not self.matches_view(name):
+                continue
+            if needle and needle not in name.lower() and needle not in self.reasons.get(name, "").lower():
+                continue
+            self.filtered.append(name)
         self.listbox.delete(0, "end")
         for name in self.filtered:
             self.listbox.insert("end", name + self.list_tag(name))
@@ -417,7 +487,7 @@ class TriageApp(tk.Tk):
             self.path_var.set("")
             self.dvd_var.set("")
             self.files.delete(0, "end")
-            self.status_var.set("Keine Skips mehr in der Liste")
+            self.status_var.set("Keine Ordner in dieser Ansicht")
             return
         if select_index is None:
             return
@@ -437,15 +507,23 @@ class TriageApp(tk.Tk):
             return None
         return self.filtered[idx]
 
-    def remove_from_triage(self, name, select_next_from=None):
-        idx = select_next_from
-        if idx is None:
-            idx = self.selected_index() or 0
-        self.skips = [n for n in self.skips if n != name]
-        save_skips(self.skips)
+    def remove_from_skip_archive(self, name):
+        if name in self.skip_set:
+            self.skips = [n for n in self.skips if n != name]
+            self.skip_set = set(self.skips)
+            save_skips(self.skips)
         if name in self.reasons:
             self.reasons.pop(name, None)
             save_reasons(self.reasons)
+
+    def remove_from_triage(self, name, select_next_from=None, rescan=True):
+        """Drop from skip archive; optionally rescan Filme list."""
+        idx = select_next_from
+        if idx is None:
+            idx = self.selected_index() or 0
+        self.remove_from_skip_archive(name)
+        if rescan:
+            self.folders = scan_filme_folders()
         self.refresh_list(select_index=idx)
 
     def on_select(self, _event=None):
@@ -454,7 +532,14 @@ class TriageApp(tk.Tk):
             return
         folder = FILME / name
         self.name_var.set(name)
-        self.reason_var.set(self.reasons.get(name, "(kein Reason-Eintrag)"))
+        if name in self.skip_set:
+            self.reason_var.set(self.reasons.get(name, "(in Skip-Archiv, kein Reason-Text)"))
+        elif name in self.pending:
+            self.reason_var.set("In Pending — bereit für Batch ×N")
+        elif name in self.dvd_parked:
+            self.reason_var.set("In dvd_manual.txt geparkt")
+        else:
+            self.reason_var.set("READY — nicht in Skip-Liste (Batch/Jahr/Pending möglich)")
         self.path_var.set(str(folder))
         is_dvd = has_dvd_structure(folder)
         multi = "multi-movie" in self.reasons.get(name, "").lower()
@@ -555,6 +640,7 @@ class TriageApp(tk.Tk):
             messagebox.showerror("Fehler", f"Ordner fehlt:\n{folder}")
             return
         base = re.sub(r"\s*\(\d{4}\)\s*$", "", name).strip()
+        base = re.sub(r"[_\s.-](19\d{2}|20\d{2})$", "", base).strip()
         new_name = f"{base} ({year})"
         dest = FILME / new_name
         if dest.exists():
@@ -565,9 +651,30 @@ class TriageApp(tk.Tk):
         except OSError as exc:
             messagebox.showerror("Fehler", f"Rename fehlgeschlagen:\n{exc}")
             return
-        self.remove_from_triage(name, select_next_from=idx)
+        self.remove_from_skip_archive(name)
         self.queue_for_batch(new_name)
+        self.folders = scan_filme_folders()
+        # select the renamed folder if visible
+        self.refresh_list(select_index=0)
+        if new_name in self.filtered:
+            idx = self.filtered.index(new_name)
+            self.listbox.selection_clear(0, "end")
+            self.listbox.selection_set(idx)
+            self.listbox.see(idx)
+            self.on_select()
         self.status_var.set(f"→ {new_name} · pending {len(self.pending)}")
+
+    def add_to_pending(self):
+        name = self.selected_name()
+        if not name:
+            return
+        if not (FILME / name).is_dir():
+            messagebox.showerror("Fehler", "Ordner fehlt")
+            return
+        self.remove_from_skip_archive(name)
+        self.queue_for_batch(name)
+        self.refresh_list(select_index=self.selected_index() or 0)
+        self.status_var.set(f"→ Pending: {name} ({len(self.pending)})")
 
     def convert_ratdvd(self):
         name = self.selected_name()
@@ -612,7 +719,8 @@ class TriageApp(tk.Tk):
             self.status_var.set("ratDVD fehlgeschlagen")
             return
         messagebox.showinfo("ratDVD", f"Fertig: {name}/VIDEO_TS\n\n" + (out[-800:] if out else ""))
-        self.on_select()
+        self.folders = scan_filme_folders()
+        self.refresh_list(select_index=self.selected_index() or 0)
         self.status_var.set(f"ratDVD → VIDEO_TS ok: {name}")
 
     def mark_dvd(self):
@@ -632,7 +740,9 @@ class TriageApp(tk.Tk):
         ):
             return
         append_dvd_queue(name, note)
-        self.remove_from_triage(name, select_next_from=idx)
+        self.remove_from_skip_archive(name)
+        self.dvd_parked = load_dvd_queue_names()
+        self.refresh_list(select_index=idx)
         self.status_var.set(f"DVD abgelegt: {name}")
 
     def delete_folder(self):
@@ -657,7 +767,12 @@ class TriageApp(tk.Tk):
         except OSError as exc:
             messagebox.showerror("Fehler", f"Löschen fehlgeschlagen:\n{exc}")
             return
-        self.remove_from_triage(name, select_next_from=idx)
+        self.remove_from_skip_archive(name)
+        if name in self.pending:
+            self.pending = [n for n in self.pending if n != name]
+            save_pending(self.pending)
+        self.folders = scan_filme_folders()
+        self.refresh_list(select_index=idx)
         self.status_var.set(f"Gelöscht: {name}")
 
     def unskip(self):
@@ -665,14 +780,18 @@ class TriageApp(tk.Tk):
         if not name:
             return
         idx = self.selected_index() or 0
+        if name not in self.skip_set:
+            messagebox.showinfo("Unskip", "Nicht in der Skip-Liste — nutze „→ Pending“.")
+            return
         if not messagebox.askyesno(
             "Unskip",
-            f"Aus permanent_skipped nehmen und in Pending-Batch?\n\n{name}",
+            f"Aus permanent_skipped nehmen und in Pending?\n\n{name}",
         ):
             return
-        self.remove_from_triage(name, select_next_from=idx)
+        self.remove_from_skip_archive(name)
         if (FILME / name).is_dir():
             self.queue_for_batch(name)
+        self.refresh_list(select_index=idx)
         self.status_var.set(f"Unskip → pending {len(self.pending)}")
 
     def run_batch(self):
@@ -815,6 +934,8 @@ class TriageApp(tk.Tk):
     def _batch_finished(self):
         self.batch_running = False
         self.pending = load_pending()
+        self.folders = scan_filme_folders()
+        self.refresh_list(select_index=0)
         self.update_batch_button()
         self.status_var.set(f"Batch fertig · pending {len(self.pending)}")
 
