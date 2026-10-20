@@ -2,16 +2,16 @@
 # Batch: rescan Filme → dry-run N → execute successes → mv to Movies → repeat.
 # Movielist is rebuilt every batch from what is still in Filme.
 # Skips are remembered so they are not retried forever.
+# Paths: env / CLI > ~/.config/jellyfin-movie-renamer/paths.json > ~/Filme ~/Movies
 set -euo pipefail
 
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 BATCH_SIZE="${BATCH_SIZE:-10}"
-FILME="${FILME:-/mnt/nfs/huddle/media/Filme}"
-MOVIES="${MOVIES:-/mnt/nfs/huddle/media/Movies}"
-WORK="${WORK_DIR:-$HOME/filme_batch_work}"
-RENAMER="$(cd "$(dirname "$0")" && pwd)/movie_renamer.py"
-SKIP_ARCHIVE="$WORK/permanent_skipped.txt"
-DVD_QUEUE="$WORK/dvd_manual.txt"
+eval "$(python3 "$SCRIPT_DIR/paths_config.py" --shell)"
+WORK="$WORK_DIR"
+RENAMER="$SCRIPT_DIR/movie_renamer.py"
 ONCE=0
+RESET_SKIPS=0
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
@@ -19,18 +19,24 @@ while [[ $# -gt 0 ]]; do
     --batch-size) BATCH_SIZE="$2"; shift 2 ;;
     --filme) FILME="$2"; shift 2 ;;
     --movies) MOVIES="$2"; shift 2 ;;
-    --reset-skips) rm -f "$SKIP_ARCHIVE"; shift ;;
+    --work) WORK="$2"; WORK_DIR="$2"; shift 2 ;;
+    --reset-skips) RESET_SKIPS=1; shift ;;
     -h|--help)
-      echo "Usage: $0 [--once] [--batch-size N] [--reset-skips] [--filme PATH] [--movies PATH]"
+      echo "Usage: $0 [--once] [--batch-size N] [--reset-skips] [--filme PATH] [--movies PATH] [--work PATH]"
       echo "Env: BATCH_SIZE FILME MOVIES WORK_DIR"
+      echo "Config: ~/.config/jellyfin-movie-renamer/paths.json (same as triage GUI)"
       echo
       echo "Each batch rescans Filme (fresh list). Successes are moved to Movies."
-      echo "IMDb skips are appended to $SKIP_ARCHIVE and ignored next round."
+      echo "IMDb skips go to \$WORK/permanent_skipped.txt and are ignored next round."
       exit 0
       ;;
     *) echo "Unknown arg: $1" >&2; exit 1 ;;
   esac
 done
+
+SKIP_ARCHIVE="$WORK/permanent_skipped.txt"
+DVD_QUEUE="$WORK/dvd_manual.txt"
+[[ "$RESET_SKIPS" -eq 1 ]] && rm -f "$SKIP_ARCHIVE"
 
 mkdir -p "$WORK"
 touch "$SKIP_ARCHIVE"

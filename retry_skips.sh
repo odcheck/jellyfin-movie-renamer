@@ -1,29 +1,37 @@
 #!/usr/bin/env bash
 # Re-probe permanent_skipped.txt one-by-one (dry-run + debug) → skipped_reasons.txt
+# Paths: env / CLI > ~/.config/jellyfin-movie-renamer/paths.json > ~/Filme
 set -euo pipefail
 
-FILME="${FILME:-/mnt/nfs/huddle/media/Filme}"
-WORK="${WORK_DIR:-$HOME/filme_batch_work}"
-SKIP_ARCHIVE="${SKIP_ARCHIVE:-$WORK/permanent_skipped.txt}"
-OUT="${OUT:-$WORK/skipped_reasons.txt}"
-RENAMER="$(cd "$(dirname "$0")" && pwd)/movie_renamer.py"
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+eval "$(python3 "$SCRIPT_DIR/paths_config.py" --shell)"
+WORK="$WORK_DIR"
+RENAMER="$SCRIPT_DIR/movie_renamer.py"
 LIMIT="${LIMIT:-0}"   # 0 = all
 OFFSET="${OFFSET:-0}"
+SKIP_ARCHIVE="${SKIP_ARCHIVE:-}"
+OUT="${OUT:-}"
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --limit) LIMIT="$2"; shift 2 ;;
     --offset) OFFSET="$2"; shift 2 ;;
     --filme) FILME="$2"; shift 2 ;;
+    --work) WORK="$2"; WORK_DIR="$2"; shift 2 ;;
     --skips) SKIP_ARCHIVE="$2"; shift 2 ;;
     --out) OUT="$2"; shift 2 ;;
     -h|--help)
-      echo "Usage: $0 [--limit N] [--offset N] [--skips FILE] [--out FILE] [--filme PATH]"
+      echo "Usage: $0 [--limit N] [--offset N] [--skips FILE] [--out FILE] [--filme PATH] [--work PATH]"
+      echo "Env: FILME WORK_DIR SKIP_ARCHIVE OUT"
+      echo "Config: ~/.config/jellyfin-movie-renamer/paths.json (same as triage GUI)"
       exit 0
       ;;
     *) echo "Unknown arg: $1" >&2; exit 1 ;;
   esac
 done
+
+SKIP_ARCHIVE="${SKIP_ARCHIVE:-$WORK/permanent_skipped.txt}"
+OUT="${OUT:-$WORK/skipped_reasons.txt}"
 
 [[ -f "$SKIP_ARCHIVE" ]] || { echo "Missing skip archive: $SKIP_ARCHIVE" >&2; exit 1; }
 [[ -f "$RENAMER" ]] || { echo "Missing renamer: $RENAMER" >&2; exit 1; }

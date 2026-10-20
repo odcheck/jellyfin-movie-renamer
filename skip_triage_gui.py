@@ -10,16 +10,35 @@ import tkinter as tk
 from pathlib import Path
 from tkinter import messagebox, ttk
 
-FILME = Path(os.environ.get("FILME", "/mnt/nfs/huddle/media/Filme"))
-MOVIES = Path(os.environ.get("MOVIES", "/mnt/nfs/huddle/media/Movies"))
-WORK = Path(os.environ.get("WORK_DIR", Path.home() / "filme_batch_work"))
-SKIP_ARCHIVE = Path(os.environ.get("SKIP_ARCHIVE", WORK / "permanent_skipped.txt"))
-REASONS_FILE = Path(os.environ.get("REASONS_FILE", WORK / "skipped_reasons.txt"))
-MANUAL_LATER = Path(os.environ.get("MANUAL_LATER", WORK / "manual_later.txt"))
-PENDING_FILE = Path(os.environ.get("PENDING_FILE", WORK / "pending_batch.txt"))
+import paths_config
+
 SCRIPT_DIR = Path(__file__).resolve().parent
 RENAMER = SCRIPT_DIR / "movie_renamer.py"
 MEDIA_TO_MP4 = SCRIPT_DIR / "media_to_mp4.py"
+
+# Set by apply_paths() — env > ~/.config/…/paths.json > ~/Filme etc.
+FILME = MOVIES = WORK = Path(".")
+SKIP_ARCHIVE = REASONS_FILE = MANUAL_LATER = PENDING_FILE = Path(".")
+
+
+def apply_paths(filme=None, movies=None, work=None):
+    """Update module path globals (and derived archive files under WORK)."""
+    global FILME, MOVIES, WORK, SKIP_ARCHIVE, REASONS_FILE, MANUAL_LATER, PENDING_FILE
+    f, m, w = paths_config.resolve()
+    if filme is not None:
+        f = Path(filme).expanduser()
+    if movies is not None:
+        m = Path(movies).expanduser()
+    if work is not None:
+        w = Path(work).expanduser()
+    FILME, MOVIES, WORK = f, m, w
+    SKIP_ARCHIVE = Path(os.environ["SKIP_ARCHIVE"]) if os.environ.get("SKIP_ARCHIVE") else WORK / "permanent_skipped.txt"
+    REASONS_FILE = Path(os.environ["REASONS_FILE"]) if os.environ.get("REASONS_FILE") else WORK / "skipped_reasons.txt"
+    MANUAL_LATER = Path(os.environ["MANUAL_LATER"]) if os.environ.get("MANUAL_LATER") else WORK / "manual_later.txt"
+    PENDING_FILE = Path(os.environ["PENDING_FILE"]) if os.environ.get("PENDING_FILE") else WORK / "pending_batch.txt"
+
+
+apply_paths()
 # Jellyfin-ok containers that skip convert and may go to rename/pending.
 READY_VIDEO_EXT = {".mkv", ".mp4", ".avi"}
 VIDEO_EXT = READY_VIDEO_EXT | {".mov", ".m4v", ".wmv", ".mpg", ".mpeg", ".m2ts", ".ts", ".divx"}
@@ -531,8 +550,48 @@ class TriageApp(tk.Tk):
         self._build()
         # Fast scandir (no per-row NFS walks). Deep media checks only on select / filtered views.
         self.rescan_filme(select_index=0)
+        if not FILME.is_dir():
+            self.status_var.set(f"Filme-Pfad fehlt — oben setzen und „Pfade speichern“: {FILME}")
+
+    def save_paths(self):
+        filme = self.filme_var.get().strip()
+        movies = self.movies_var.get().strip()
+        work = self.work_var.get().strip()
+        if not filme or not movies or not work:
+            messagebox.showerror("Pfade", "Filme, Movies und Work müssen gesetzt sein.")
+            return
+        paths_config.save_config(filme, movies, work)
+        # Drop env overrides for the three roots so the saved file wins this session.
+        for key in ("FILME", "MOVIES", "WORK_DIR"):
+            os.environ.pop(key, None)
+        apply_paths(filme, movies, work)
+        self.filme_var.set(str(FILME))
+        self.movies_var.set(str(MOVIES))
+        self.work_var.set(str(WORK))
+        self.reasons = load_reasons()
+        self.skips = load_skips()
+        self.skip_set = set(self.skips)
+        self.pending = load_pending()
+        self.manual_later = load_manual_later_names()
+        self.rescan_filme(select_index=0)
+        self.status_var.set(f"Pfade gespeichert → {paths_config.CONFIG_PATH}")
+        if not FILME.is_dir():
+            messagebox.showwarning("Pfade", f"Filme existiert noch nicht:\n{FILME}")
 
     def _build(self):
+        paths = ttk.Frame(self, padding=(8, 8, 8, 0))
+        paths.pack(fill="x")
+        self.filme_var = tk.StringVar(value=str(FILME))
+        self.movies_var = tk.StringVar(value=str(MOVIES))
+        self.work_var = tk.StringVar(value=str(WORK))
+        ttk.Label(paths, text="Filme:").pack(side="left")
+        ttk.Entry(paths, textvariable=self.filme_var, width=28).pack(side="left", padx=(2, 8))
+        ttk.Label(paths, text="Movies:").pack(side="left")
+        ttk.Entry(paths, textvariable=self.movies_var, width=28).pack(side="left", padx=(2, 8))
+        ttk.Label(paths, text="Work:").pack(side="left")
+        ttk.Entry(paths, textvariable=self.work_var, width=22).pack(side="left", padx=(2, 8))
+        ttk.Button(paths, text="Pfade speichern", command=self.save_paths).pack(side="left")
+
         top = ttk.Frame(self, padding=8)
         top.pack(fill="x")
         ttk.Label(top, text="Filter:").pack(side="left")
@@ -1517,8 +1576,6 @@ class TriageApp(tk.Tk):
 
 
 def main():
-    if not FILME.is_dir():
-        raise SystemExit(f"Filme path missing: {FILME}")
     app = TriageApp()
     app.mainloop()
 
