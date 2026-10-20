@@ -27,7 +27,7 @@ class LooseMediaTests(unittest.TestCase):
             (base / "Platoon.avi.metathumb").write_bytes(b"thumb")
             (base / "other.txt").write_text("keep")
 
-            folder_name = self.mod.wrap_loose_media("Platoon.avi", filme=base)
+            folder_name = self.mod.wrap_loose_media("Platoon.avi", source=base)
             self.assertEqual(folder_name, "Platoon")
             dest = base / "Platoon"
             self.assertTrue((dest / "Platoon.avi").is_file())
@@ -46,12 +46,12 @@ class LooseMediaTests(unittest.TestCase):
             (base / "Loose.avi").write_bytes(b"x")
             (base / "Loose.nfo").write_text("nfo")
             (base / "skip.jpg").write_bytes(b"j")
-            old = self.mod.FILME
+            old = self.mod.SOURCE
             try:
-                self.mod.FILME = base
-                names = self.mod.scan_filme_folders()
+                self.mod.SOURCE = base
+                names = self.mod.scan_source_folders()
             finally:
-                self.mod.FILME = old
+                self.mod.SOURCE = old
             self.assertIn("Movie Dir", names)
             self.assertIn("Loose.avi", names)
             self.assertNotIn("Loose.nfo", names)

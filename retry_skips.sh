@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Re-probe permanent_skipped.txt one-by-one (dry-run + debug) → skipped_reasons.txt
-# Paths: env / CLI > ~/.config/jellyfin-movie-renamer/paths.json > ~/Filme
+# Paths: env / CLI > ~/.config/jellyfin-movie-renamer/paths.json > ~/Source
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
@@ -16,13 +16,13 @@ while [[ $# -gt 0 ]]; do
   case "$1" in
     --limit) LIMIT="$2"; shift 2 ;;
     --offset) OFFSET="$2"; shift 2 ;;
-    --filme) FILME="$2"; shift 2 ;;
+    --source|--filme) SOURCE="$2"; shift 2 ;;
     --work) WORK="$2"; WORK_DIR="$2"; shift 2 ;;
     --skips) SKIP_ARCHIVE="$2"; shift 2 ;;
     --out) OUT="$2"; shift 2 ;;
     -h|--help)
-      echo "Usage: $0 [--limit N] [--offset N] [--skips FILE] [--out FILE] [--filme PATH] [--work PATH]"
-      echo "Env: FILME WORK_DIR SKIP_ARCHIVE OUT"
+      echo "Usage: $0 [--limit N] [--offset N] [--skips FILE] [--out FILE] [--source PATH] [--work PATH]"
+      echo "Env: SOURCE WORK_DIR SKIP_ARCHIVE OUT"
       echo "Config: ~/.config/jellyfin-movie-renamer/paths.json (same as triage GUI)"
       exit 0
       ;;
@@ -35,7 +35,7 @@ OUT="${OUT:-$WORK/skipped_reasons.txt}"
 
 [[ -f "$SKIP_ARCHIVE" ]] || { echo "Missing skip archive: $SKIP_ARCHIVE" >&2; exit 1; }
 [[ -f "$RENAMER" ]] || { echo "Missing renamer: $RENAMER" >&2; exit 1; }
-[[ -d "$FILME" ]] || { echo "Missing Filme: $FILME" >&2; exit 1; }
+[[ -d "$SOURCE" ]] || { echo "Missing Source: $SOURCE" >&2; exit 1; }
 mkdir -p "$WORK"
 
 mapfile -t NAMES < <(grep -v '^[[:space:]]*$' "$SKIP_ARCHIVE")
@@ -54,14 +54,14 @@ for ((i = START; i < END; i++)); do
   name="${NAMES[$i]}"
   echo
   echo "========== [$((i + 1))/$TOTAL] $name =========="
-  folder="$FILME/$name"
+  folder="$SOURCE/$name"
   if [[ ! -d "$folder" ]]; then
     printf '%s | folder missing (already moved or renamed)\n' "$name" | tee -a "$OUT"
     continue
   fi
 
   list="$WORK/_retry_one.txt"
-  printf '# BASE_PATH=%s\n%s\n' "$FILME" "$name" > "$list"
+  printf '# BASE_PATH=%s\n%s\n' "$SOURCE" "$name" > "$list"
   log="$WORK/_retry_one.log"
   set +e
   python3 "$RENAMER" \

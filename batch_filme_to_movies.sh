@@ -1,8 +1,9 @@
 #!/usr/bin/env bash
-# Batch: rescan Filme → dry-run N → execute successes → mv to Movies → repeat.
-# Movielist is rebuilt every batch from what is still in Filme.
+# Batch: rescan Source → dry-run N → execute successes → mv to Destination → repeat.
+# Movielist is rebuilt every batch from what is still in Source.
 # Skips are remembered so they are not retried forever.
-# Paths: env / CLI > ~/.config/jellyfin-movie-renamer/paths.json > ~/Filme ~/Movies
+# Paths: env / CLI > ~/.config/jellyfin-movie-renamer/paths.json > ~/Source ~/Destination
+# Source = dirty inbox; Destination = cleaned Jellyfin library.
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
@@ -17,16 +18,16 @@ while [[ $# -gt 0 ]]; do
   case "$1" in
     --once) ONCE=1; shift ;;
     --batch-size) BATCH_SIZE="$2"; shift 2 ;;
-    --filme) FILME="$2"; shift 2 ;;
-    --movies) MOVIES="$2"; shift 2 ;;
+    --source|--filme) SOURCE="$2"; shift 2 ;;
+    --destination|--movies) DESTINATION="$2"; shift 2 ;;
     --work) WORK="$2"; WORK_DIR="$2"; shift 2 ;;
     --reset-skips) RESET_SKIPS=1; shift ;;
     -h|--help)
-      echo "Usage: $0 [--once] [--batch-size N] [--reset-skips] [--filme PATH] [--movies PATH] [--work PATH]"
-      echo "Env: BATCH_SIZE FILME MOVIES WORK_DIR"
+      echo "Usage: $0 [--once] [--batch-size N] [--reset-skips] [--source PATH] [--destination PATH] [--work PATH]"
+      echo "Env: BATCH_SIZE SOURCE DESTINATION WORK_DIR"
       echo "Config: ~/.config/jellyfin-movie-renamer/paths.json (same as triage GUI)"
       echo
-      echo "Each batch rescans Filme (dirty source). Successes are moved to Movies (clean Jellyfin)."
+      echo "Each batch rescans Source (dirty inbox). Successes move to Destination (clean Jellyfin)."
       echo "IMDb skips go to \$WORK/permanent_skipped.txt and are ignored next round."
       exit 0
       ;;
@@ -40,22 +41,22 @@ DVD_QUEUE="$WORK/dvd_manual.txt"
 
 mkdir -p "$WORK"
 touch "$SKIP_ARCHIVE"
-[[ -d "$FILME" ]] || { echo "Filme path missing: $FILME" >&2; exit 1; }
-[[ -d "$MOVIES" ]] || { echo "Movies path missing: $MOVIES" >&2; exit 1; }
+[[ -d "$SOURCE" ]] || { echo "Source path missing: $SOURCE" >&2; exit 1; }
+[[ -d "$DESTINATION" ]] || { echo "Destination path missing: $DESTINATION" >&2; exit 1; }
 [[ -f "$RENAMER" ]] || { echo "Renamer missing: $RENAMER" >&2; exit 1; }
 
-echo "Filme=$FILME"
-echo "Movies=$MOVIES"
+echo "Source=$SOURCE"
+echo "Destination=$DESTINATION"
 echo "batch=$BATCH_SIZE | skip-archive=$SKIP_ARCHIVE"
 
 build_batch_list() {
-  # Fresh scan of Filme, drop permanent skips, write up to BATCH_SIZE names.
+  # Fresh scan of Source, drop permanent skips, write up to BATCH_SIZE names.
   # Pure Python filter — avoids `set -o pipefail` dying on `grep | head` SIGPIPE.
-  python3 "$RENAMER" --generate-inputfile-from="$FILME" --fileoutput="$WORK"
+  python3 "$RENAMER" --generate-inputfile-from="$SOURCE" --fileoutput="$WORK"
   local full="$WORK/movielist.txt"
   local out="$WORK/batch_list.txt"
   touch "$DVD_QUEUE"
-  eval "$(python3 - "$full" "$SKIP_ARCHIVE" "$DVD_QUEUE" "$out" "$FILME" "$BATCH_SIZE" <<'PY'
+  eval "$(python3 - "$full" "$SKIP_ARCHIVE" "$DVD_QUEUE" "$out" "$SOURCE" "$BATCH_SIZE" <<'PY'
 import sys
 from pathlib import Path
 
@@ -131,7 +132,7 @@ while true; do
   echo "========== remaining≈$REMAINING | this batch=$BATCH_COUNT =========="
 
   if (( BATCH_COUNT == 0 )); then
-    echo "Nothing left to try (Filme empty of non-skipped folders)."
+    echo "Nothing left to try (Source empty of non-skipped folders)."
     break
   fi
 
@@ -159,7 +160,7 @@ while true; do
     done < "$WORK/backlog_skipped.txt"
   fi
 
-  # Folder renamed but no video → leave in Filme, don't retry as success-move
+  # Folder renamed but no video → leave in Source, don't retry as success-move
   if [[ -f "$WORK/backlog.txt" ]]; then
     while IFS= read -r name; do
       [[ -z "$name" ]] && continue
@@ -177,7 +178,7 @@ while true; do
   else
     echo "Movable successes: ${#MOVABLE[@]}"
     {
-      echo "# BASE_PATH=$FILME"
+      echo "# BASE_PATH=$SOURCE"
       for row in "${MOVABLE[@]}"; do
         printf '%s\n' "${row%%$'\t'*}"
       done
@@ -190,18 +191,18 @@ while true; do
       --success-file="$WORK/success_execute.txt" \
       --backlog-file="$WORK/backlog_execute.txt"
 
-    echo "--- MOVE TO Movies ---"
+    echo "--- MOVE TO Destination ---"
     for row in "${MOVABLE[@]}"; do
       new="${row#*$'\t'}"
-      src="$FILME/$new"
-      dst="$MOVIES/$new"
+      src="$SOURCE/$new"
+      dst="$DESTINATION/$new"
       if [[ -e "$src" ]]; then
         if [[ -e "$dst" ]]; then
-          # Already in Movies from an earlier run — drop Filme leftover.
-          echo "ALREADY in Movies: $new — removing Filme leftover"
+          # Already in Destination from an earlier run — drop Source leftover.
+          echo "ALREADY in Destination: $new — removing Source leftover"
           rm -rf "$src"
         else
-          mv "$src" "$MOVIES/"
+          mv "$src" "$DESTINATION/"
           echo "MOVED: $new"
         fi
       else
@@ -217,4 +218,4 @@ while true; do
 done
 
 echo
-echo "Done. Skips/backlog kept in Filme; see $SKIP_ARCHIVE"
+echo "Done. Skips/backlog kept in Source; see $SKIP_ARCHIVE"
