@@ -108,15 +108,24 @@ def remove_manual_later(name):
     MANUAL_LATER.write_text("".join(n + "\n" for n in kept), encoding="utf-8")
 
 
-# Loose files sometimes sit in Filme/; skip by suffix so we never stat (NFS hangs).
-_SCAN_SKIP_SUFFIXES = VIDEO_EXT | {
-    ".iso", ".img", ".nfo", ".txt", ".jpg", ".jpeg", ".png", ".srt", ".sfv", ".xml",
+# Sidecars next to loose media — skip in scan (NFS: suffix only, never stat).
+_SCAN_SKIP_SUFFIXES = {
+    ".nfo", ".txt", ".jpg", ".jpeg", ".png", ".srt", ".sfv", ".xml",
     ".metathumb",  # XBMC/Kodi thumbnail sidecar next to loose .avi etc.
 }
+# Loose media in Filme/ root — shown in GUI, wrapped into a folder before rename/move.
+LOOSE_MEDIA_EXT = VIDEO_EXT | {".iso", ".img"}
+_LOOSE_SIDECAR_EXTS = (
+    ".nfo", ".txt", ".jpg", ".jpeg", ".png", ".srt", ".sfv", ".xml", ".metathumb",
+)
+
+
+def is_loose_media_name(name: str) -> bool:
+    return Path(name).suffix.lower() in LOOSE_MEDIA_EXT
 
 
 def scan_filme_folders():
-    """All movie folders still under Filme/ (source of truth for the left list)."""
+    """Movie folders + loose media files still under Filme/ (left-list source of truth)."""
     if not FILME.is_dir():
         return []
     names = []
@@ -126,12 +135,50 @@ def scan_filme_folders():
                 if entry.name.startswith(".") or entry.name.startswith("@"):
                     continue
                 # Avoid entry.is_dir() — NFS hard-mount can block forever on stale dentries.
-                if Path(entry.name).suffix.lower() in _SCAN_SKIP_SUFFIXES:
+                suffix = Path(entry.name).suffix.lower()
+                if suffix in LOOSE_MEDIA_EXT:
+                    names.append(entry.name)
+                    continue
+                if suffix in _SCAN_SKIP_SUFFIXES:
                     continue
                 names.append(entry.name)
     except OSError:
         return []
     return sorted(names, key=str.lower)
+
+
+def wrap_loose_media(name: str, filme: Path = None) -> str:
+    """
+    If name is a loose media file under Filme/, move it (+ same-stem sidecars)
+    into Filme/<stem>/. Returns the folder name to use afterwards.
+    """
+    base = filme if filme is not None else FILME
+    if not is_loose_media_name(name):
+        return name
+    src = base / name
+    if src.is_dir():
+        return name
+    if not src.is_file():
+        raise FileNotFoundError(f"Loose media missing: {src}")
+    folder_name = src.stem
+    dest_dir = base / folder_name
+    if dest_dir.exists() and not dest_dir.is_dir():
+        raise RuntimeError(f"Cannot wrap into {dest_dir} (exists, not a folder)")
+    dest_dir.mkdir(exist_ok=True)
+    target = dest_dir / src.name
+    if target.exists():
+        raise RuntimeError(f"Target already exists: {target}")
+    src.rename(target)
+    stem = src.stem
+    for ext in _LOOSE_SIDECAR_EXTS:
+        side = base / f"{stem}{ext}"
+        if side.is_file():
+            side.rename(dest_dir / side.name)
+        # e.g. Movie.avi.metathumb
+        side2 = base / f"{name}{ext}"
+        if side2.is_file():
+            side2.rename(dest_dir / side2.name)
+    return folder_name
 
 
 def find_ratdvds(folder: Path):
@@ -141,12 +188,20 @@ def find_ratdvds(folder: Path):
 
 
 def is_ratdvd_xc(folder: Path) -> bool:
-    """ratDVD XC unpack (fake VOBs) — cannot HandBrake/ffmpeg to mp4."""
+    """ratDVD unpack (.VSI / XC) — fake VOBs, cannot HandBrake/ffmpeg to mp4."""
     for ver in (folder / "Version.xml",):
         try:
             if ver.is_file() and "<videoformat>XC</videoformat>" in ver.read_text(
                 encoding="utf-8", errors="ignore"
             ):
+                return True
+        except OSError:
+            pass
+    for root in (folder, folder / "VIDEO_TS"):
+        if not root.is_dir():
+            continue
+        try:
+            if any(p.suffix.upper() == ".VSI" for p in root.iterdir() if p.is_file()):
                 return True
         except OSError:
             pass
@@ -243,6 +298,8 @@ def has_bluray_stream(folder: Path) -> bool:
 
 def needs_media_convert(folder: Path) -> bool:
     """ISO / VIDEO_TS / ratDVD / DivX / mpg / mpeg / m2ts still need convert before rename is ideal."""
+    if is_ratdvd_xc(folder):
+        return False  # proprietary VOBs — convert would hang/fail
     return bool(
         find_ffmpeg_convert_files(folder)
         or find_ratdvds(folder)
@@ -265,6 +322,17 @@ def peek_folder_media(folder: Path) -> dict:
         "divx": False,
         "dvd": False,
     }
+    # Loose media listed as triage item (before wrap into folder).
+    if folder.is_file() and folder.suffix.lower() in LOOSE_MEDIA_EXT:
+        out["empty"] = False
+        suf = folder.suffix.lower()
+        if suf in READY_VIDEO_EXT:
+            out["ready"] = True
+        elif suf in FFMPEG_CONVERT_EXTS or suf in {".iso", ".img"}:
+            out["convert"] = True
+            if suf in {".iso", ".img"}:
+                out["dvd"] = True
+        return out
     if not folder.is_dir():
         out["missing"] = True
         return out
@@ -518,7 +586,11 @@ class TriageApp(tk.Tk):
         self.dvd_var = tk.StringVar()
         self.status_var = tk.StringVar()
 
-        ttk.Label(detail, textvariable=self.name_var, font=("", 12, "bold")).pack(anchor="w")
+        # Entry (not Label) so the title can be selected/copied.
+        name_entry = ttk.Entry(
+            detail, textvariable=self.name_var, font=("", 12, "bold"), state="readonly"
+        )
+        name_entry.pack(anchor="w", fill="x")
         ttk.Label(detail, textvariable=self.dvd_var, foreground="#884400").pack(anchor="w")
         ttk.Label(detail, textvariable=self.reason_var, wraplength=560).pack(anchor="w", pady=(4, 8))
         ttk.Label(detail, textvariable=self.path_var, wraplength=560).pack(anchor="w")
@@ -554,7 +626,8 @@ class TriageApp(tk.Tk):
 
         ttk.Label(
             detail,
-            text="mkv/avi/mp4 = Format OK → Jahr/IMDb → Pending → Batch (Rename). "
+            text="mkv/avi/mp4 = Format OK → Jahr/IMDb → Pending → Batch (Rename→Movies). "
+                 "Lose Dateien in Filme/ werden beim Setzen/Pending in einen Ordner gewickelt. "
                  "ISO/DVD/ratDVD/DivX/mpg/mpeg = Noch Umzuwandeln → „→ mp4“. "
                  "„Später ansehen“ = manuell.",
             wraplength=560,
@@ -603,6 +676,8 @@ class TriageApp(tk.Tk):
     def list_tag(self, name):
         # Memory-only tags here — filesystem peeks on every row freeze NFS startups.
         tags = []
+        if is_loose_media_name(name):
+            tags.append("DATEI")
         if name in self.pending:
             tags.append("PENDING")
         if name in self.manual_later:
@@ -613,6 +688,49 @@ class TriageApp(tk.Tk):
         if "multi-movie" in reason:
             tags.append("DVD-SET")
         return " [" + ", ".join(tags) + "]" if tags else ""
+
+    def retarget_tracked(self, old: str, new: str):
+        """Rename old→new in pending / skip / reasons / manual-later lists."""
+        if not old or not new or old == new:
+            return
+        if old in self.pending:
+            self.pending = [new if n == old else n for n in self.pending]
+            # dedupe preserve order
+            seen = set()
+            self.pending = [n for n in self.pending if not (n in seen or seen.add(n))]
+            save_pending(self.pending)
+        if old in self.skip_set:
+            self.skips = [new if n == old else n for n in self.skips]
+            if new not in self.skips:
+                self.skips.append(new)
+            seen = set()
+            self.skips = [n for n in self.skips if not (n in seen or seen.add(n))]
+            self.skip_set = set(self.skips)
+            save_skips(self.skips)
+        if old in self.reasons:
+            self.reasons[new] = self.reasons.pop(old)
+            save_reasons(self.reasons)
+        if old in self.manual_later:
+            remove_manual_later(old)
+            append_manual_later(new, "manuell")
+            self.manual_later = load_manual_later_names()
+        self.update_batch_button()
+
+    def ensure_movie_folder(self, name):
+        """Wrap loose media into a folder; update tracking. None on failure."""
+        if not name:
+            return None
+        if not is_loose_media_name(name):
+            return name
+        try:
+            new_name = wrap_loose_media(name)
+        except (OSError, RuntimeError, FileNotFoundError) as exc:
+            messagebox.showerror("Fehler", f"Datei→Ordner fehlgeschlagen:\n{exc}")
+            return None
+        if new_name != name:
+            self.retarget_tracked(name, new_name)
+            self.folders = scan_filme_folders()
+        return new_name
 
     def matches_view(self, name):
         mode = self.view_mode.get()
@@ -749,6 +867,32 @@ class TriageApp(tk.Tk):
         else:
             self.reason_var.set("In Filme/ — Format prüfen, dann Pending oder Umwandeln")
         self.path_var.set(str(folder))
+
+        # Loose file: show status without wrapping (wrap happens on Setzen/Pending/…).
+        if is_loose_media_name(name):
+            suf = Path(name).suffix.lower()
+            self.files.delete(0, "end")
+            self.files.insert("end", name + " [lose Datei]")
+            m = re.search(r"\((\d{4})\)", Path(name).stem)
+            if not m:
+                m = re.search(r"(?<!\d)(19\d{2}|20\d{2})(?!\d)", Path(name).stem)
+            self.year_var.set(m.group(1) if m else "")
+            self.imdb_var.set("")
+            if suf in READY_VIDEO_EXT:
+                self.dvd_var.set(
+                    "Lose Datei (Format OK) — Jahr/IMDb oder → Pending wickelt in Ordner"
+                )
+                self.status_var.set("DATEI · FORMAT-OK")
+            elif suf in FFMPEG_CONVERT_EXTS or suf in {".iso", ".img"}:
+                self.dvd_var.set(
+                    "Lose Datei — „→ mp4“ / Pending wickelt zuerst in Ordner"
+                )
+                self.status_var.set("DATEI · →mp4")
+            else:
+                self.dvd_var.set("Lose Mediendatei")
+                self.status_var.set("DATEI")
+            return
+
         is_dvd = has_dvd_structure(folder)
         is_xc = is_ratdvd_xc(folder)
         multi = "multi-movie" in self.reasons.get(name, "").lower()
@@ -761,7 +905,7 @@ class TriageApp(tk.Tk):
             status_bits.append("Format OK (mkv/avi/mp4) — Rename/Pending noch nötig")
         if is_xc:
             status_bits.append(
-                "ratDVD XC (kein echtes MPEG-DVD) — „→ mp4“ geht nicht; "
+                "ratDVD (.VSI/XC, kein echtes MPEG-DVD) — „→ mp4“ geht nicht; "
                 "Original-.ratDVD + ratDVD-App nötig"
             )
         elif convert:
@@ -851,6 +995,14 @@ class TriageApp(tk.Tk):
         name = self.selected_name()
         if not name:
             return
+        if is_loose_media_name(name):
+            path = FILME / name
+            if path.is_file():
+                subprocess.Popen(["xdg-open", str(path.parent)])
+                return
+        name = self.ensure_movie_folder(name)
+        if not name:
+            return
         folder = FILME / name
         if not folder.is_dir():
             messagebox.showerror("Fehler", f"Ordner fehlt:\n{folder}")
@@ -861,6 +1013,11 @@ class TriageApp(tk.Tk):
         name = self.selected_name()
         if not name:
             return
+        if is_loose_media_name(name):
+            path = FILME / name
+            if path.is_file():
+                subprocess.Popen(["xdg-open", str(path)])
+                return
         folder = FILME / name
         videos = find_videos(folder, limit=1)
         if videos:
@@ -889,11 +1046,7 @@ class TriageApp(tk.Tk):
         name = self.selected_name()
         if not name:
             return
-        folder = FILME / name
-        if not folder.is_dir():
-            messagebox.showerror("Fehler", f"Ordner fehlt:\n{folder}")
-            return
-
+        # Read fields before wrap — wrap/rescan must not clobber user input.
         year = self.year_var.get().strip()
         imdb_raw = self.imdb_var.get().strip()
         imdb_id = None
@@ -909,6 +1062,14 @@ class TriageApp(tk.Tk):
             return
         if not year and not imdb_id:
             messagebox.showerror("Fehler", "Jahr und/oder IMDb-ID eintragen")
+            return
+
+        name = self.ensure_movie_folder(name)
+        if not name:
+            return
+        folder = FILME / name
+        if not folder.is_dir():
+            messagebox.showerror("Fehler", f"Ordner fehlt:\n{folder}")
             return
 
         new_name = name
@@ -966,6 +1127,9 @@ class TriageApp(tk.Tk):
         name = self.selected_name()
         if not name:
             return
+        name = self.ensure_movie_folder(name)
+        if not name:
+            return
         folder = FILME / name
         if not folder.is_dir():
             messagebox.showerror("Fehler", "Ordner fehlt")
@@ -979,7 +1143,13 @@ class TriageApp(tk.Tk):
                 return
         self.remove_from_skip_archive(name)
         self.queue_for_batch(name)
-        self.refresh_list(select_index=self.selected_index() or 0)
+        self.refresh_list(select_index=0)
+        if name in self.filtered:
+            idx = self.filtered.index(name)
+            self.listbox.selection_clear(0, "end")
+            self.listbox.selection_set(idx)
+            self.listbox.see(idx)
+            self.on_select()
         self.status_var.set(f"→ Pending: {name} ({len(self.pending)})")
 
     def mark_later(self):
@@ -1009,6 +1179,9 @@ class TriageApp(tk.Tk):
 
     def convert_media_one(self):
         name = self.selected_name()
+        if not name:
+            return
+        name = self.ensure_movie_folder(name)
         if not name:
             return
         folder = FILME / name
@@ -1063,11 +1236,13 @@ class TriageApp(tk.Tk):
                 for i, folder in enumerate(folders, 1):
                     win.set_phase(f"[{i}/{len(folders)}] {folder.name}", i - 1)
                     win.log(f"\n=== {folder.name} ===")
+                    env = {**os.environ, "PYTHONUNBUFFERED": "1"}
                     proc = subprocess.Popen(
-                        ["python3", str(MEDIA_TO_MP4), str(folder)],
+                        ["python3", "-u", str(MEDIA_TO_MP4), str(folder)],
                         cwd=str(SCRIPT_DIR),
                         stdout=subprocess.PIPE,
                         stderr=subprocess.STDOUT,
+                        env=env,
                     )
                     assert proc.stdout is not None
                     # HandBrake progress can emit non-UTF-8; never use text=True here.
@@ -1099,6 +1274,25 @@ class TriageApp(tk.Tk):
             return
         idx = self.selected_index() or 0
         folder = FILME / name
+        if is_loose_media_name(name) and folder.is_file():
+            if not messagebox.askyesno("Datei löschen?", f"Lose Datei LÖSCHEN?\n\n{folder}"):
+                return
+            try:
+                folder.unlink()
+            except OSError as exc:
+                messagebox.showerror("Fehler", f"Löschen fehlgeschlagen:\n{exc}")
+                return
+            self.remove_from_skip_archive(name)
+            if name in self.pending:
+                self.pending = [n for n in self.pending if n != name]
+                save_pending(self.pending)
+            if name in self.manual_later:
+                remove_manual_later(name)
+                self.manual_later = load_manual_later_names()
+            self.folders = scan_filme_folders()
+            self.refresh_list(select_index=idx)
+            self.status_var.set(f"Gelöscht: {name}")
+            return
         if not folder.is_dir():
             if messagebox.askyesno("Nur Liste", f"Ordner fehlt. Nur aus Skip-Liste?\n\n{name}"):
                 self.remove_from_triage(name, select_next_from=idx)
@@ -1140,6 +1334,7 @@ class TriageApp(tk.Tk):
         ):
             return
         self.remove_from_skip_archive(name)
+        name = self.ensure_movie_folder(name) or name
         if (FILME / name).is_dir():
             self.queue_for_batch(name)
         self.refresh_list(select_index=idx)
@@ -1149,6 +1344,22 @@ class TriageApp(tk.Tk):
         if self.batch_running:
             messagebox.showinfo("Batch", "Läuft bereits.")
             return
+        # Wrap any loose pending files into folders first.
+        wrapped = []
+        for n in list(self.pending):
+            if is_loose_media_name(n):
+                try:
+                    new = wrap_loose_media(n)
+                except (OSError, RuntimeError, FileNotFoundError) as exc:
+                    messagebox.showerror("Pending", f"Wrap fehlgeschlagen für {n}:\n{exc}")
+                    return
+                if new != n:
+                    self.retarget_tracked(n, new)
+                wrapped.append(new)
+            else:
+                wrapped.append(n)
+        self.pending = list(dict.fromkeys(wrapped))
+        save_pending(self.pending)
         # Drop pending entries whose folders vanished
         alive = [n for n in self.pending if (FILME / n).is_dir()]
         missing = [n for n in self.pending if n not in alive]
