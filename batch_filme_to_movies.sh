@@ -26,7 +26,7 @@ while [[ $# -gt 0 ]]; do
       echo "Env: BATCH_SIZE FILME MOVIES WORK_DIR"
       echo "Config: ~/.config/jellyfin-movie-renamer/paths.json (same as triage GUI)"
       echo
-      echo "Each batch rescans Filme (fresh list). Successes are moved to Movies."
+      echo "Each batch rescans Filme (dirty source). Successes are moved to Movies (clean Jellyfin)."
       echo "IMDb skips go to \$WORK/permanent_skipped.txt and are ignored next round."
       exit 0
       ;;

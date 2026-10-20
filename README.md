@@ -93,9 +93,9 @@ Triage GUI and batch scripts share one path config.
 
 | Path | Meaning | Default |
 | --- | --- | --- |
-| **Filme** | Inbox / unsorted movie folders | `~/Filme` |
-| **Movies** | Destination after successful rename | `~/Movies` |
-| **Work** | Skip archives, pending lists, batch scratch | `~/filme_batch_work` |
+| **Filme** | Unsauberer Quellordner (Inbox, noch nicht Jellyfin-fertig) | `~/Filme` |
+| **Movies** | Bereinigter Jellyfin-Ordner (Ziel nach Rename) | `~/Movies` |
+| **Work** | Skip-Archive, Pending-Listen, Batch-Scratch | `~/filme_batch_work` |
 
 **Priority:** environment variables → config file → defaults above.
 
@@ -340,7 +340,7 @@ Output file: `Movie (1965)/Movie (1965).mp4`. HandBrake progress can contain non
 
 ## Skip Triage GUI (`skip_triage_gui.py`)
 
-Interactive triage for folders under **Filme** (skips, convert, pending rename → **Movies**):
+Interactive triage: **Filme** (unsauberer Quellordner) → convert / rename → **Movies** (bereinigter Jellyfin-Ordner):
 
 ```bash
 python3 skip_triage_gui.py
