@@ -1,6 +1,33 @@
 # Jellyfin Movie Renamer
 
+[![Python](https://img.shields.io/badge/Python-3.6%2B-blue?logo=python&logoColor=white)](https://www.python.org/)
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
+[![Jellyfin](https://img.shields.io/badge/Jellyfin-compatible-00A4DC?logo=jellyfin&logoColor=white)](https://jellyfin.org/)
+[![ffmpeg](https://img.shields.io/badge/ffmpeg-required-green?logo=ffmpeg&logoColor=white)](https://ffmpeg.org/)
+[![HandBrake](https://img.shields.io/badge/HandBrake-optional-darkred?logo=handbrake&logoColor=white)](https://handbrake.fr/)
+
 Rename movie folders and files into a Jellyfin-friendly format using IMDb lookup, local metadata, and safe ambiguity handling. Optional tools convert legacy disc/container media to MP4 and triage skipped folders in a GUI.
+
+## Table of Contents
+
+- [What It Does](#what-it-does)
+- [Current Behavior](#current-behavior)
+- [Requirements](#requirements)
+- [Installation](#installation)
+- [Usage](#usage)
+- [Command-Line Options](#command-line-options)
+- [Default Files](#default-files)
+- [Output Files](#output-files)
+- [Lookup Rules](#lookup-rules)
+- [DVD / ISO Handling](#dvd--iso-handling-rename)
+- [Media → MP4](#media--mp4-media_to_mp4py)
+- [Skip Triage GUI](#skip-triage-gui-skip_triage_guipy)
+- [Nested Video Handling](#nested-video-handling)
+- [Example Workflows](#example-workflows)
+- [Troubleshooting](#troubleshooting)
+- [Safety](#safety)
+- [Credits](#credits)
+- [License](#license)
 
 ## What It Does
 
@@ -14,7 +41,7 @@ Rename movie folders and files into a Jellyfin-friendly format using IMDb lookup
 - Renames extras to Jellyfin-style suffixes, for example:
   - `Movie_Name (year) [imdbid-ttXXXXXX]-sample.ext`
   - `Movie_Name (year) [imdbid-ttXXXXXX]-trailer.ext`
-- Converts DivX / mpg / mpeg / DVD (`VIDEO_TS`) / ISO / ratDVD / Blu-ray `STREAM/*.m2ts` → MP4 (`media_to_mp4.py`)
+- Converts DivX / mpg / mpeg / DVD (`VIDEO_TS`) / ISO / [ratDVD](https://www.ratdvd.ca/) / Blu-ray `STREAM/*.m2ts` → MP4 (`media_to_mp4.py`)
 - Triages skipped folders in a GUI: set year/IMDb, queue pending renames, batch convert to MP4 (`skip_triage_gui.py`)
 
 ## Current Behavior
@@ -42,7 +69,7 @@ Rename movie folders and files into a Jellyfin-friendly format using IMDb lookup
 - `requests`
 - `beautifulsoup4`
 - `file` command available on the host for MIME-type verification
-- For `media_to_mp4.py`: `ffmpeg` / `ffprobe`; HandBrakeCLI (Flatpak `fr.handbrake.ghb` preferred, with `libdvdcss` for CSS DVDs); `7z`/`7za` as ISO extract fallback
+- For `media_to_mp4.py`: [ffmpeg](https://ffmpeg.org/) / `ffprobe`; [HandBrakeCLI](https://handbrake.fr/) (Flatpak `fr.handbrake.ghb` preferred, with `libdvdcss` for CSS DVDs); `7z`/`7za` as ISO extract fallback
 
 ## Installation
 
@@ -72,13 +99,13 @@ python3 movie_renamer.py --generate-inputfile-from=/path/to/movies --fileoutput=
 Example:
 
 ```bash
-python3 movie_renamer.py --generate-inputfile-from=/mnt/nfs/huddle/media/Filme --fileoutput=/home/ben
+python3 movie_renamer.py --generate-inputfile-from=/mnt/nfs/huddle/media/Filme --fileoutput=/home/your_username
 ```
 
 This creates:
 
 ```text
-/home/ben/movielist.txt
+/home/your_username/movielist.txt
 ```
 
 The generated file also stores the source folder in a header:
@@ -94,7 +121,7 @@ That means a later `--input` run automatically knows where to look.
 Dry run is the default. No files are changed.
 
 ```bash
-python3 movie_renamer.py --input=/home/ben/movielist.txt
+python3 movie_renamer.py --input=/home/your_username/movielist.txt
 ```
 
 Useful for checking:
@@ -107,13 +134,13 @@ Useful for checking:
 ### 3. Execute Real Renaming
 
 ```bash
-python3 movie_renamer.py --input=/home/ben/movielist.txt --execute
+python3 movie_renamer.py --input=/home/your_username/movielist.txt --execute
 ```
 
 ### 4. Verbose Debugging
 
 ```bash
-python3 movie_renamer.py --input=/home/ben/movielist.txt --debug
+python3 movie_renamer.py --input=/home/your_username/movielist.txt --debug
 ```
 
 This prints:
@@ -248,10 +275,10 @@ Converts legacy media in a movie folder to H.264/AAC MP4 (German audio preferred
 
 | Source | Tool |
 | --- | --- |
-| `.divx` / `.mpg` / `.mpeg` | ffmpeg |
-| `VIDEO_TS` / flat IFO+VOB | HandBrake (+libdvdcss); ffmpeg VOB-concat fallback |
+| `.divx` / `.mpg` / `.mpeg` | [ffmpeg](https://ffmpeg.org/) |
+| `VIDEO_TS` / flat IFO+VOB | [HandBrake](https://handbrake.fr/) (+libdvdcss); ffmpeg VOB-concat fallback |
 | `.iso` / `.ISO` | HandBrake; on failure extract via 7z then DVD path |
-| `.ratDVD` | unpack → `VIDEO_TS` → same as DVD (XC format cannot convert) |
+| [`.ratDVD`](https://www.ratdvd.ca/) | unpack → `VIDEO_TS` → same as DVD ([XC format](https://www.ratdvd.ca/) cannot convert — needs the original [ratDVD](https://www.ratdvd.ca/) app) |
 | Blu-ray `STREAM/*.m2ts` | ffmpeg concat (playlist order when `.mpls` present) |
 
 ```bash
@@ -267,6 +294,8 @@ python3 media_to_mp4.py --from-list ~/to_convert.txt
 
 Output file: `Movie (1965)/Movie (1965).mp4`. HandBrake progress can contain non-UTF-8 bytes; the CLI and triage GUI decode with replacement so converts are not aborted mid-encode.
 
+> **Note:** [ratDVD](https://www.ratdvd.ca/) XC unpacks (fake VOBs from XVO) cannot be converted by HandBrake/ffmpeg. You need the original [ratDVD](https://www.ratdvd.ca/) application to expand them to a real DVD, or keep the `.ratDVD` source.
+
 ## Skip Triage GUI (`skip_triage_gui.py`)
 
 Interactive triage for folders that landed in the skip archive:
@@ -278,7 +307,7 @@ python3 skip_triage_gui.py
 Typical flow:
 
 1. Open a skipped folder — set year and/or IMDb ID → **Pending**
-2. If the folder still has ISO / DVD / DivX / mpg / ratDVD / m2ts → **→ mp4** (or **Batch Medien→mp4**)
+2. If the folder still has ISO / DVD / DivX / mpg / [ratDVD](https://www.ratdvd.ca/) / m2ts → **→ mp4** (or **Batch Medien→mp4**)
 3. When format is OK (`mkv`/`mp4`/`avi`) → **Batch ×N** runs the renamer on pending titles
 
 Closing the GUI does not kill an in-flight HandBrake encode; stop leftover jobs with `pkill -f HandBrakeCLI` / `pkill -f media_to_mp4` if needed.
@@ -312,35 +341,35 @@ super_movie (1968)[imdbid-123456]-cd2.avi
 1. Generate a list:
 
 ```bash
-python3 movie_renamer.py --generate-inputfile-from=/mnt/nfs/huddle/media/Filme --fileoutput=/home/ben
+python3 movie_renamer.py --generate-inputfile-from=/mnt/nfs/huddle/media/Filme --fileoutput=/home/your_username
 ```
 
 2. Inspect with dry-run:
 
 ```bash
-python3 movie_renamer.py --input=/home/ben/movielist.txt --debug
+python3 movie_renamer.py --input=/home/your_username/movielist.txt --debug
 ```
 
 3. If the output looks correct, execute:
 
 ```bash
-python3 movie_renamer.py --input=/home/ben/movielist.txt --execute
+python3 movie_renamer.py --input=/home/your_username/movielist.txt --execute
 ```
 
 ### Custom Output Files
 
 ```bash
 python3 movie_renamer.py \
-  --input=/home/ben/movielist.txt \
+  --input=/home/your_username/movielist.txt \
   --execute \
-  --backlog-file=/home/ben/custom_backlog.txt \
-  --success-file=/home/ben/custom_success.txt
+  --backlog-file=/home/your_username/custom_backlog.txt \
+  --success-file=/home/your_username/custom_success.txt
 ```
 
 Skipped entries will be written automatically to:
 
 ```text
-/home/ben/custom_backlog_skipped.txt
+/home/your_username/custom_backlog_skipped.txt
 ```
 
 ## Troubleshooting
@@ -356,7 +385,7 @@ Possible causes:
 Use:
 
 ```bash
-python3 movie_renamer.py --input=/home/ben/movielist.txt --debug
+python3 movie_renamer.py --input=/home/your_username/movielist.txt --debug
 ```
 
 ### A title was skipped even though a metadata file exists
@@ -389,6 +418,25 @@ Add one of:
 - preserves DVD structures and ISO images
 - records successful renames
 - records skipped items with reasons
+
+## Credits
+
+This project builds on and gratefully uses:
+
+| | Project | Role |
+| --- | --- | --- |
+| ![Jellyfin](https://cdn.simpleicons.org/jellyfin/00A4DC) | [Jellyfin](https://jellyfin.org/) | Naming conventions this renamer targets |
+| ![ffmpeg](https://cdn.simpleicons.org/ffmpeg/007808) | [ffmpeg](https://ffmpeg.org/) | Container convert (DivX/mpg/mpeg, Blu-ray m2ts, DVD fallback) |
+| ![HandBrake](https://cdn.simpleicons.org/handbrake/D2BD1A) | [HandBrake](https://handbrake.fr/) | DVD / ISO encode via HandBrakeCLI |
+| | [ratDVD](https://www.ratdvd.ca/) | Legacy `.ratDVD` container format (unpack / XC note) |
+| ![Python](https://cdn.simpleicons.org/python/3776AB) | [Python](https://www.python.org/) | Runtime |
+| | [IMDb](https://www.imdb.com/) | Title / year / ID lookup |
+| | [Beautiful Soup](https://www.crummy.com/software/BeautifulSoup/) | HTML parsing for lookups |
+| | [Requests](https://requests.readthedocs.io/) | HTTP client |
+| | [7-Zip](https://www.7-zip.org/) | ISO / archive extract fallback |
+| | [libdvdcss](https://www.videolan.org/developers/libdvdcss.html) | CSS-encrypted DVD support with HandBrake |
+
+Repository: [odcheck/jellyfin-movie-renamer](https://github.com/odcheck/jellyfin-movie-renamer)
 
 ## License
 
