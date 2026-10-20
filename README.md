@@ -91,21 +91,21 @@ pip3 install requests beautifulsoup4
 
 Triage GUI and batch scripts share one path config.
 
-| Path | Meaning | Default |
+| Path | Description | Default |
 | --- | --- | --- |
-| **Filme** | Inbox / unsorted movie folders | `~/Filme` |
-| **Movies** | Destination after successful rename | `~/Movies` |
-| **Work** | Skip archives, pending lists, batch scratch | `~/filme_batch_work` |
+| **Source** | dirty source folder | `~/Source` |
+| **Destination** | cleaned Jellyfin folder | `~/Destination` |
+| **Work** | scratch / archives | `~/renamer_work` |
 
 **Priority:** environment variables → config file → defaults above.
 
 | Variable | Sets |
 | --- | --- |
-| `FILME` | Filme |
-| `MOVIES` | Movies |
+| `SOURCE` | Source (`FILME` still accepted) |
+| `DESTINATION` | Destination (`MOVIES` still accepted) |
 | `WORK_DIR` | Work |
 
-Config file (written by the GUI **Pfade speichern** button):
+Config file (written by the GUI **Save paths** button):
 
 ```text
 ~/.config/jellyfin-movie-renamer/paths.json
@@ -115,17 +115,17 @@ Example:
 
 ```json
 {
-  "filme": "/path/to/Filme",
-  "movies": "/path/to/Movies",
-  "work": "/path/to/filme_batch_work"
+  "source": "/path/to/Source",
+  "destination": "/path/to/Destination",
+  "work": "/path/to/renamer_work"
 }
 ```
 
 CLI overrides (same paths as the GUI):
 
 ```bash
-./batch_filme_to_movies.sh --filme /path/to/Filme --movies /path/to/Movies --work /path/to/work
-./retry_skips.sh --filme /path/to/Filme --work /path/to/work
+./batch_filme_to_movies.sh --source /path/to/Source --destination /path/to/Destination --work /path/to/work
+./retry_skips.sh --source /path/to/Source --work /path/to/work
 ```
 
 Inspect resolved paths:
@@ -141,7 +141,7 @@ python3 paths_config.py --print
 Scan a movie directory and create `movielist.txt`.
 
 ```bash
-python3 movie_renamer.py --generate-inputfile-from=/path/to/Filme --fileoutput=/home/your_username
+python3 movie_renamer.py --generate-inputfile-from=/path/to/Source --fileoutput=/home/your_username
 ```
 
 This creates:
@@ -153,7 +153,7 @@ This creates:
 The generated file also stores the source folder in a header:
 
 ```text
-# BASE_PATH=/path/to/Filme
+# BASE_PATH=/path/to/Source
 ```
 
 That means a later `--input` run automatically knows where to look.
@@ -340,18 +340,18 @@ Output file: `Movie (1965)/Movie (1965).mp4`. HandBrake progress can contain non
 
 ## Skip Triage GUI (`skip_triage_gui.py`)
 
-Interactive triage for folders under **Filme** (skips, convert, pending rename → **Movies**):
+Interactive triage: **Source** (= dirty source folder) → convert / rename → **Destination** (= cleaned Jellyfin folder):
 
 ```bash
 python3 skip_triage_gui.py
 ```
 
-Set **Filme** / **Movies** / **Work** in the top row and click **Pfade speichern** (writes `~/.config/jellyfin-movie-renamer/paths.json`). Batch scripts pick up the same file. See [Library Paths](#library-paths).
+Set **Source** / **Destination** / **Work** in the top row and click **Save paths** (writes `~/.config/jellyfin-movie-renamer/paths.json`). Batch scripts pick up the same file. See [Library Paths](#library-paths).
 
 Typical flow:
 
 1. Open a folder — set year and/or IMDb ID → **Pending**
-2. If the folder still has ISO / DVD / DivX / mpg / [ratDVD](https://www.ratdvd.ca/) / m2ts → **→ mp4** (or **Batch Medien→mp4**)
+2. If the folder still has ISO / DVD / DivX / mpg / [ratDVD](https://www.ratdvd.ca/) / m2ts → **→ mp4** (or **Batch media→mp4**)
 3. When format is OK (`mkv`/`mp4`/`avi`) → **Batch ×N** runs the renamer on pending titles
 
 Closing the GUI does not kill an in-flight HandBrake encode; stop leftover jobs with `pkill -f HandBrakeCLI` / `pkill -f media_to_mp4` if needed.
@@ -385,7 +385,7 @@ super_movie (1968)[imdbid-123456]-cd2.avi
 1. Generate a list:
 
 ```bash
-python3 movie_renamer.py --generate-inputfile-from=/path/to/Filme --fileoutput=/home/your_username
+python3 movie_renamer.py --generate-inputfile-from=/path/to/Source --fileoutput=/home/your_username
 ```
 
 2. Inspect with dry-run:

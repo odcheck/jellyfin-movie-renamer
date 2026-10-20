@@ -14,49 +14,68 @@ class PathsConfigTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             cfg = Path(tmp) / "paths.json"
             cfg.write_text(json.dumps({
-                "filme": "/from/config/Filme",
-                "movies": "/from/config/Movies",
+                "source": "/from/config/Source",
+                "destination": "/from/config/Destination",
                 "work": "/from/config/work",
             }))
             env = {
-                "FILME": "/from/env/Filme",
-                "MOVIES": "/from/env/Movies",
+                "SOURCE": "/from/env/Source",
+                "DESTINATION": "/from/env/Destination",
                 "WORK_DIR": "/from/env/work",
             }
             with mock.patch.object(paths_config, "CONFIG_PATH", cfg), \
                     mock.patch.dict(os.environ, env, clear=False):
-                for key in ("FILME", "MOVIES", "WORK_DIR"):
-                    self.assertEqual(os.environ[key], env[key])
-                filme, movies, work = paths_config.resolve()
-            self.assertEqual(filme, Path("/from/env/Filme"))
-            self.assertEqual(movies, Path("/from/env/Movies"))
+                source, destination, work = paths_config.resolve()
+            self.assertEqual(source, Path("/from/env/Source"))
+            self.assertEqual(destination, Path("/from/env/Destination"))
             self.assertEqual(work, Path("/from/env/work"))
 
     def test_resolve_uses_config_when_env_absent(self):
         with tempfile.TemporaryDirectory() as tmp:
             cfg = Path(tmp) / "paths.json"
             cfg.write_text(json.dumps({
-                "filme": "/cfg/Filme",
-                "movies": "/cfg/Movies",
+                "source": "/cfg/Source",
+                "destination": "/cfg/Destination",
                 "work": "/cfg/work",
             }))
-            clean = {k: v for k, v in os.environ.items()
-                     if k not in ("FILME", "MOVIES", "WORK_DIR")}
+            clean = {
+                k: v for k, v in os.environ.items()
+                if k not in ("SOURCE", "DESTINATION", "FILME", "MOVIES", "WORK_DIR")
+            }
             with mock.patch.object(paths_config, "CONFIG_PATH", cfg), \
                     mock.patch.dict(os.environ, clean, clear=True):
-                filme, movies, work = paths_config.resolve()
-            self.assertEqual(filme, Path("/cfg/Filme"))
-            self.assertEqual(movies, Path("/cfg/Movies"))
+                source, destination, work = paths_config.resolve()
+            self.assertEqual(source, Path("/cfg/Source"))
+            self.assertEqual(destination, Path("/cfg/Destination"))
             self.assertEqual(work, Path("/cfg/work"))
+
+    def test_legacy_filme_movies_config_keys(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            cfg = Path(tmp) / "paths.json"
+            cfg.write_text(json.dumps({
+                "filme": "/legacy/Filme",
+                "movies": "/legacy/Movies",
+                "work": "/legacy/work",
+            }))
+            clean = {
+                k: v for k, v in os.environ.items()
+                if k not in ("SOURCE", "DESTINATION", "FILME", "MOVIES", "WORK_DIR")
+            }
+            with mock.patch.object(paths_config, "CONFIG_PATH", cfg), \
+                    mock.patch.dict(os.environ, clean, clear=True):
+                source, destination, work = paths_config.resolve()
+            self.assertEqual(source, Path("/legacy/Filme"))
+            self.assertEqual(destination, Path("/legacy/Movies"))
+            self.assertEqual(work, Path("/legacy/work"))
 
     def test_save_config_roundtrip(self):
         with tempfile.TemporaryDirectory() as tmp:
             cfg = Path(tmp) / "paths.json"
             with mock.patch.object(paths_config, "CONFIG_PATH", cfg):
-                paths_config.save_config("~/Filme", "/path/to/Movies", "/path/to/work")
+                paths_config.save_config("~/Source", "/path/to/Destination", "/path/to/work")
                 data = json.loads(cfg.read_text())
-            self.assertEqual(data["filme"], str(Path("~/Filme").expanduser()))
-            self.assertEqual(data["movies"], "/path/to/Movies")
+            self.assertEqual(data["source"], str(Path("~/Source").expanduser()))
+            self.assertEqual(data["destination"], "/path/to/Destination")
             self.assertEqual(data["work"], "/path/to/work")
 
 
