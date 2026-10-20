@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""GUI to triage Filme/: format gate, convert, pending rename batch, manual-later queue."""
+"""GUI to triage Source/: format gate, convert, pending rename batch, manual-later queue."""
 import os
 import queue
 import re
@@ -16,22 +16,22 @@ SCRIPT_DIR = Path(__file__).resolve().parent
 RENAMER = SCRIPT_DIR / "movie_renamer.py"
 MEDIA_TO_MP4 = SCRIPT_DIR / "media_to_mp4.py"
 
-# Set by apply_paths() — env > ~/.config/…/paths.json > ~/Filme etc.
-FILME = MOVIES = WORK = Path(".")
+# Set by apply_paths() — env > ~/.config/…/paths.json > ~/Source etc.
+SOURCE = DESTINATION = WORK = Path(".")
 SKIP_ARCHIVE = REASONS_FILE = MANUAL_LATER = PENDING_FILE = Path(".")
 
 
-def apply_paths(filme=None, movies=None, work=None):
+def apply_paths(source=None, destination=None, work=None):
     """Update module path globals (and derived archive files under WORK)."""
-    global FILME, MOVIES, WORK, SKIP_ARCHIVE, REASONS_FILE, MANUAL_LATER, PENDING_FILE
+    global SOURCE, DESTINATION, WORK, SKIP_ARCHIVE, REASONS_FILE, MANUAL_LATER, PENDING_FILE
     f, m, w = paths_config.resolve()
-    if filme is not None:
-        f = Path(filme).expanduser()
-    if movies is not None:
-        m = Path(movies).expanduser()
+    if source is not None:
+        f = Path(source).expanduser()
+    if destination is not None:
+        m = Path(destination).expanduser()
     if work is not None:
         w = Path(work).expanduser()
-    FILME, MOVIES, WORK = f, m, w
+    SOURCE, DESTINATION, WORK = f, m, w
     SKIP_ARCHIVE = Path(os.environ["SKIP_ARCHIVE"]) if os.environ.get("SKIP_ARCHIVE") else WORK / "permanent_skipped.txt"
     REASONS_FILE = Path(os.environ["REASONS_FILE"]) if os.environ.get("REASONS_FILE") else WORK / "skipped_reasons.txt"
     MANUAL_LATER = Path(os.environ["MANUAL_LATER"]) if os.environ.get("MANUAL_LATER") else WORK / "manual_later.txt"
@@ -132,7 +132,7 @@ _SCAN_SKIP_SUFFIXES = {
     ".nfo", ".txt", ".jpg", ".jpeg", ".png", ".srt", ".sfv", ".xml",
     ".metathumb",  # XBMC/Kodi thumbnail sidecar next to loose .avi etc.
 }
-# Loose media in Filme/ root — shown in GUI, wrapped into a folder before rename/move.
+# Loose media in Source/ root — shown in GUI, wrapped into a folder before rename/move.
 LOOSE_MEDIA_EXT = VIDEO_EXT | {".iso", ".img"}
 _LOOSE_SIDECAR_EXTS = (
     ".nfo", ".txt", ".jpg", ".jpeg", ".png", ".srt", ".sfv", ".xml", ".metathumb",
@@ -143,13 +143,13 @@ def is_loose_media_name(name: str) -> bool:
     return Path(name).suffix.lower() in LOOSE_MEDIA_EXT
 
 
-def scan_filme_folders():
-    """Movie folders + loose media files still under Filme/ (left-list source of truth)."""
-    if not FILME.is_dir():
+def scan_source_folders():
+    """Movie folders + loose media files still under Source/ (left-list source of truth)."""
+    if not SOURCE.is_dir():
         return []
     names = []
     try:
-        with os.scandir(FILME) as entries:
+        with os.scandir(SOURCE) as entries:
             for entry in entries:
                 if entry.name.startswith(".") or entry.name.startswith("@"):
                     continue
@@ -166,12 +166,12 @@ def scan_filme_folders():
     return sorted(names, key=str.lower)
 
 
-def wrap_loose_media(name: str, filme: Path = None) -> str:
+def wrap_loose_media(name: str, source: Path = None) -> str:
     """
-    If name is a loose media file under Filme/, move it (+ same-stem sidecars)
-    into Filme/<stem>/. Returns the folder name to use afterwards.
+    If name is a loose media file under Source/, move it (+ same-stem sidecars)
+    into Source/<stem>/. Returns the folder name to use afterwards.
     """
-    base = filme if filme is not None else FILME
+    base = source if source is not None else SOURCE
     if not is_loose_media_name(name):
         return name
     src = base / name
@@ -496,7 +496,7 @@ class BatchProgressWindow(tk.Toplevel):
         self.text.pack(side="left", fill="both", expand=True)
         scroll.pack(side="right", fill="y")
 
-        self.close_btn = ttk.Button(self, text="Schließen", command=self.destroy, state="disabled")
+        self.close_btn = ttk.Button(self, text="Close", command=self.destroy, state="disabled")
         self.close_btn.pack(pady=8)
 
         self._q = queue.Queue()
@@ -536,7 +536,7 @@ class BatchProgressWindow(tk.Toplevel):
 class TriageApp(tk.Tk):
     def __init__(self):
         super().__init__()
-        self.title("Filme triage")
+        self.title("Source triage")
         self.geometry("1000x720")
         self.reasons = load_reasons()
         self.skips = load_skips()
@@ -545,52 +545,53 @@ class TriageApp(tk.Tk):
         self.manual_later = load_manual_later_names()
         self.folders = []
         self.filtered = []
-        self.view_mode = tk.StringVar(value="Alle")
+        self.view_mode = tk.StringVar(value="All")
         self.batch_running = False
         self._build()
         # Fast scandir (no per-row NFS walks). Deep media checks only on select / filtered views.
-        self.rescan_filme(select_index=0)
-        if not FILME.is_dir():
-            self.status_var.set(f"Filme-Pfad fehlt — oben setzen und „Pfade speichern“: {FILME}")
+        self.rescan_source(select_index=0)
+        if not SOURCE.is_dir():
+            self.status_var.set(f"Source path missing — set paths above and Save paths: {SOURCE}")
 
     def save_paths(self):
-        filme = self.filme_var.get().strip()
-        movies = self.movies_var.get().strip()
+        source = self.source_var.get().strip()
+        destination = self.destination_var.get().strip()
         work = self.work_var.get().strip()
-        if not filme or not movies or not work:
-            messagebox.showerror("Pfade", "Filme, Movies und Work müssen gesetzt sein.")
+        if not source or not destination or not work:
+            messagebox.showerror("Paths", "Source, Destination, and Work are required.")
             return
-        paths_config.save_config(filme, movies, work)
+        paths_config.save_config(source, destination, work)
         # Drop env overrides for the three roots so the saved file wins this session.
-        for key in ("FILME", "MOVIES", "WORK_DIR"):
+        for key in ("SOURCE", "DESTINATION", "FILME", "MOVIES", "WORK_DIR"):
             os.environ.pop(key, None)
-        apply_paths(filme, movies, work)
-        self.filme_var.set(str(FILME))
-        self.movies_var.set(str(MOVIES))
+        apply_paths(source, destination, work)
+        self.source_var.set(str(SOURCE))
+        self.destination_var.set(str(DESTINATION))
         self.work_var.set(str(WORK))
         self.reasons = load_reasons()
         self.skips = load_skips()
         self.skip_set = set(self.skips)
         self.pending = load_pending()
         self.manual_later = load_manual_later_names()
-        self.rescan_filme(select_index=0)
-        self.status_var.set(f"Pfade gespeichert → {paths_config.CONFIG_PATH}")
-        if not FILME.is_dir():
-            messagebox.showwarning("Pfade", f"Filme existiert noch nicht:\n{FILME}")
+        self.rescan_source(select_index=0)
+        self.status_var.set(f"Paths saved → {paths_config.CONFIG_PATH}")
+        if not SOURCE.is_dir():
+            messagebox.showwarning("Paths", f"Source does not exist yet:\n{SOURCE}")
 
     def _build(self):
         paths = ttk.Frame(self, padding=(8, 8, 8, 0))
         paths.pack(fill="x")
-        self.filme_var = tk.StringVar(value=str(FILME))
-        self.movies_var = tk.StringVar(value=str(MOVIES))
+        self.source_var = tk.StringVar(value=str(SOURCE))
+        self.destination_var = tk.StringVar(value=str(DESTINATION))
         self.work_var = tk.StringVar(value=str(WORK))
-        ttk.Label(paths, text="Filme (Quelle):").pack(side="left")
-        ttk.Entry(paths, textvariable=self.filme_var, width=26).pack(side="left", padx=(2, 8))
-        ttk.Label(paths, text="Movies (Jellyfin):").pack(side="left")
-        ttk.Entry(paths, textvariable=self.movies_var, width=26).pack(side="left", padx=(2, 8))
-        ttk.Label(paths, text="Work:").pack(side="left")
-        ttk.Entry(paths, textvariable=self.work_var, width=20).pack(side="left", padx=(2, 8))
-        ttk.Button(paths, text="Pfade speichern", command=self.save_paths).pack(side="left")
+        # Labels: Name = English description (path entries follow).
+        ttk.Label(paths, text="Source = dirty source folder").pack(side="left")
+        ttk.Entry(paths, textvariable=self.source_var, width=22).pack(side="left", padx=(4, 10))
+        ttk.Label(paths, text="Destination = cleaned Jellyfin folder").pack(side="left")
+        ttk.Entry(paths, textvariable=self.destination_var, width=22).pack(side="left", padx=(4, 10))
+        ttk.Label(paths, text="Work = scratch / archives").pack(side="left")
+        ttk.Entry(paths, textvariable=self.work_var, width=16).pack(side="left", padx=(4, 8))
+        ttk.Button(paths, text="Save paths", command=self.save_paths).pack(side="left")
 
         top = ttk.Frame(self, padding=8)
         top.pack(fill="x")
@@ -598,26 +599,26 @@ class TriageApp(tk.Tk):
         self.filter_var = tk.StringVar()
         self.filter_var.trace_add("write", lambda *_: self.refresh_list())
         ttk.Entry(top, textvariable=self.filter_var, width=22).pack(side="left", padx=4)
-        ttk.Label(top, text="Ansicht:").pack(side="left")
+        ttk.Label(top, text="View:").pack(side="left")
         view = ttk.Combobox(
             top,
             textvariable=self.view_mode,
             values=(
-                "Alle", "Skip", "Ready", "Umwandeln", "Pending",
-                "Später", "Leer",
+                "All", "Skip", "Ready", "Convert", "Pending",
+                "Later", "Empty",
             ),
             width=11,
             state="readonly",
         )
         view.pack(side="left", padx=4)
         view.bind("<<ComboboxSelected>>", lambda _e: self.refresh_list(select_index=0))
-        ttk.Button(top, text="Rescan Filme", command=self.rescan_filme).pack(side="left", padx=4)
+        ttk.Button(top, text="Rescan Source", command=self.rescan_source).pack(side="left", padx=4)
         self.batch_btn = ttk.Button(top, text="Batch ×0", command=self.run_batch)
         self.batch_btn.pack(side="left", padx=4)
-        ttk.Button(top, text="Batch Medien→mp4", command=self.run_media_convert_batch).pack(
+        ttk.Button(top, text="Batch media→mp4", command=self.run_media_convert_batch).pack(
             side="left", padx=4
         )
-        ttk.Button(top, text="Pending leeren", command=self.clear_pending).pack(side="left", padx=2)
+        ttk.Button(top, text="Clear pending", command=self.clear_pending).pack(side="left", padx=2)
         self.count_var = tk.StringVar()
         ttk.Label(top, textvariable=self.count_var).pack(side="right")
 
@@ -656,7 +657,7 @@ class TriageApp(tk.Tk):
 
         meta_row = ttk.Frame(detail)
         meta_row.pack(fill="x", pady=8)
-        ttk.Label(meta_row, text="Jahr:").pack(side="left")
+        ttk.Label(meta_row, text="Year:").pack(side="left")
         self.year_var = tk.StringVar()
         year_entry = ttk.Entry(meta_row, textvariable=self.year_var, width=8)
         year_entry.pack(side="left", padx=4)
@@ -668,31 +669,31 @@ class TriageApp(tk.Tk):
         id_entry.bind("<Return>", lambda _e: self.apply_year_and_or_imdb())
         ttk.Button(
             meta_row,
-            text="Setzen → Pending",
+            text="Apply → Pending",
             command=self.apply_year_and_or_imdb,
         ).pack(side="left", padx=4)
 
         btns = ttk.Frame(detail)
         btns.pack(fill="x", pady=4)
-        ttk.Button(btns, text="Ordner öffnen", command=self.open_folder).pack(side="left", padx=2)
-        ttk.Button(btns, text="Video abspielen", command=self.play_video).pack(side="left", padx=2)
+        ttk.Button(btns, text="Open folder", command=self.open_folder).pack(side="left", padx=2)
+        ttk.Button(btns, text="Play video", command=self.play_video).pack(side="left", padx=2)
         ttk.Button(btns, text="→ Pending", command=self.add_to_pending).pack(side="left", padx=2)
-        ttk.Button(btns, text="Später ansehen", command=self.mark_later).pack(side="left", padx=2)
+        ttk.Button(btns, text="Review later", command=self.mark_later).pack(side="left", padx=2)
         ttk.Button(btns, text="→ mp4", command=self.convert_media_one).pack(side="left", padx=2)
-        ttk.Button(btns, text="Ordner löschen", command=self.delete_folder).pack(side="left", padx=2)
+        ttk.Button(btns, text="Delete folder", command=self.delete_folder).pack(side="left", padx=2)
         ttk.Button(btns, text="Unskip", command=self.unskip).pack(side="left", padx=2)
-        ttk.Button(btns, text="Nächster", command=self.next_item).pack(side="left", padx=2)
+        ttk.Button(btns, text="Next", command=self.next_item).pack(side="left", padx=2)
 
         ttk.Label(
             detail,
-            text="mkv/avi/mp4 = Format OK → Jahr/IMDb → Pending → Batch (Rename→Movies). "
-                 "Lose Dateien in Filme/ werden beim Setzen/Pending in einen Ordner gewickelt. "
-                 "ISO/DVD/ratDVD/DivX/mpg/mpeg = Noch Umzuwandeln → „→ mp4“. "
-                 "„Später ansehen“ = manuell.",
+            text="mkv/avi/mp4 = ready → Year/IMDb → Pending → Batch (rename→Destination). "
+                 "Loose files in Source/ are wrapped into a folder on Apply/Pending. "
+                 "ISO/DVD/ratDVD/DivX/mpg/mpeg = needs convert → “→ mp4”. "
+                 "Review later = manual.",
             wraplength=560,
         ).pack(anchor="w", pady=(2, 8))
 
-        ttk.Label(detail, text="Videos / DVD-Dateien:").pack(anchor="w", pady=(4, 2))
+        ttk.Label(detail, text="Videos / DVD files:").pack(anchor="w", pady=(4, 2))
         self.files = tk.Listbox(detail, height=12)
         self.files.pack(fill="both", expand=True)
         self.files.bind("<Double-Button-1>", lambda e: self.play_selected_file())
@@ -700,7 +701,7 @@ class TriageApp(tk.Tk):
         ttk.Label(detail, textvariable=self.status_var).pack(anchor="w", pady=6)
 
     def queue_for_batch(self, folder_name):
-        """Remember a Filme folder for the next exact-size batch."""
+        """Remember a Source folder for the next exact-size batch."""
         if not folder_name:
             return
         remove_manual_later(folder_name)
@@ -713,12 +714,12 @@ class TriageApp(tk.Tk):
     def clear_pending(self):
         if not self.pending:
             return
-        if not messagebox.askyesno("Pending leeren", f"{len(self.pending)} Einträge verwerfen?"):
+        if not messagebox.askyesno("Clear pending", f"Discard {len(self.pending)} entries?"):
             return
         self.pending = []
         save_pending(self.pending)
         self.update_batch_button()
-        self.status_var.set("Pending geleert")
+        self.status_var.set("Pending cleared")
 
     def update_batch_button(self):
         n = len(self.pending)
@@ -728,19 +729,19 @@ class TriageApp(tk.Tk):
         )
         skip_n = sum(1 for n in self.folders if n in self.skip_set)
         self.count_var.set(
-            f"{len(self.filtered)}/{len(self.folders)} Ordner · "
-            f"{skip_n} skip · pending {n} · später {len(self.manual_later)}"
+            f"{len(self.filtered)}/{len(self.folders)} folders · "
+            f"{skip_n} skip · pending {n} · later {len(self.manual_later)}"
         )
 
     def list_tag(self, name):
         # Memory-only tags here — filesystem peeks on every row freeze NFS startups.
         tags = []
         if is_loose_media_name(name):
-            tags.append("DATEI")
+            tags.append("FILE")
         if name in self.pending:
             tags.append("PENDING")
         if name in self.manual_later:
-            tags.append("SPÄTER")
+            tags.append("LATER")
         if name in self.skip_set:
             tags.append("SKIP")
         reason = self.reasons.get(name, "").lower()
@@ -771,7 +772,7 @@ class TriageApp(tk.Tk):
             save_reasons(self.reasons)
         if old in self.manual_later:
             remove_manual_later(old)
-            append_manual_later(new, "manuell")
+            append_manual_later(new, "manual")
             self.manual_later = load_manual_later_names()
         self.update_batch_button()
 
@@ -784,30 +785,30 @@ class TriageApp(tk.Tk):
         try:
             new_name = wrap_loose_media(name)
         except (OSError, RuntimeError, FileNotFoundError) as exc:
-            messagebox.showerror("Fehler", f"Datei→Ordner fehlgeschlagen:\n{exc}")
+            messagebox.showerror("Error", f"File→folder wrap failed:\n{exc}")
             return None
         if new_name != name:
             self.retarget_tracked(name, new_name)
-            self.folders = scan_filme_folders()
+            self.folders = scan_source_folders()
         return new_name
 
     def matches_view(self, name):
         mode = self.view_mode.get()
-        if mode == "Alle":
+        if mode == "All":
             return True
         if mode == "Skip":
             return name in self.skip_set
         if mode == "Pending":
             return name in self.pending
-        if mode == "Später":
+        if mode == "Later":
             return name in self.manual_later
-        if mode in {"Ready", "Umwandeln", "Leer"}:
-            peek = peek_folder_media(FILME / name)
+        if mode in {"Ready", "Convert", "Empty"}:
+            peek = peek_folder_media(SOURCE / name)
             if mode == "Ready":
                 return peek["ready"] and name not in self.manual_later
-            if mode == "Umwandeln":
+            if mode == "Convert":
                 return peek["convert"]
-            if mode == "Leer":
+            if mode == "Empty":
                 return peek["empty"] and not peek["missing"]
         return True
 
@@ -833,25 +834,25 @@ class TriageApp(tk.Tk):
             self.manual_later = load_manual_later_names()
         return stale, stale_pending
 
-    def rescan_filme(self, select_index=0):
-        """Rescan Filme/ + reload archives — left list shows all folders."""
+    def rescan_source(self, select_index=0):
+        """Rescan Source/ + reload archives — left list shows all folders."""
         self.reasons = load_reasons()
         self.skips = load_skips()
         self.skip_set = set(self.skips)
         self.pending = load_pending()
         self.manual_later = load_manual_later_names()
-        self.folders = scan_filme_folders()
+        self.folders = scan_source_folders()
         stale, stale_pending = self.prune_stale_skips(present_names=self.folders)
         self.refresh_list(select_index=select_index)
-        msg = f"Rescan: {len(self.folders)} Ordner in Filme/"
+        msg = f"Rescan: {len(self.folders)} folders in Source/"
         if stale:
-            msg += f" · {len(stale)} tote Skips entfernt"
+            msg += f" · removed {len(stale)} stale skips"
         if stale_pending:
-            msg += f" · {len(stale_pending)} Pending entfernt"
+            msg += f" · removed {len(stale_pending)} pending"
         self.status_var.set(msg)
 
     def reload_from_disk(self):
-        self.rescan_filme(select_index=0)
+        self.rescan_source(select_index=0)
 
     def refresh_list(self, select_index=None):
         needle = self.filter_var.get().strip().lower()
@@ -872,7 +873,7 @@ class TriageApp(tk.Tk):
             self.path_var.set("")
             self.dvd_var.set("")
             self.files.delete(0, "end")
-            self.status_var.set("Keine Ordner in dieser Ansicht")
+            self.status_var.set("No folders in this view")
             return
         if select_index is None:
             return
@@ -902,36 +903,36 @@ class TriageApp(tk.Tk):
             save_reasons(self.reasons)
 
     def remove_from_triage(self, name, select_next_from=None, rescan=True):
-        """Drop from skip archive; optionally rescan Filme list."""
+        """Drop from skip archive; optionally rescan Source list."""
         idx = select_next_from
         if idx is None:
             idx = self.selected_index() or 0
         self.remove_from_skip_archive(name)
         if rescan:
-            self.folders = scan_filme_folders()
+            self.folders = scan_source_folders()
         self.refresh_list(select_index=idx)
 
     def on_select(self, _event=None):
         name = self.selected_name()
         if not name:
             return
-        folder = FILME / name
+        folder = SOURCE / name
         self.name_var.set(name)
         if name in self.skip_set:
-            self.reason_var.set(self.reasons.get(name, "(in Skip-Archiv, kein Reason-Text)"))
+            self.reason_var.set(self.reasons.get(name, "(in skip archive, no reason text)"))
         elif name in self.pending:
-            self.reason_var.set("In Pending — bereit für Batch ×N (Rename Titel/Jahr/IMDb)")
+            self.reason_var.set("In Pending — ready for Batch ×N (rename title/year/IMDb)")
         elif name in self.manual_later:
-            self.reason_var.set("Später ansehen — manuell nacharbeiten")
+            self.reason_var.set("Review later — manual follow-up")
         else:
-            self.reason_var.set("In Filme/ — Format prüfen, dann Pending oder Umwandeln")
+            self.reason_var.set("In Source/ — check format, then Pending or Convert")
         self.path_var.set(str(folder))
 
-        # Loose file: show status without wrapping (wrap happens on Setzen/Pending/…).
+        # Loose file: show status without wrapping (wrap happens on Apply/Pending/…).
         if is_loose_media_name(name):
             suf = Path(name).suffix.lower()
             self.files.delete(0, "end")
-            self.files.insert("end", name + " [lose Datei]")
+            self.files.insert("end", name + " [loose file]")
             m = re.search(r"\((\d{4})\)", Path(name).stem)
             if not m:
                 m = re.search(r"(?<!\d)(19\d{2}|20\d{2})(?!\d)", Path(name).stem)
@@ -939,17 +940,17 @@ class TriageApp(tk.Tk):
             self.imdb_var.set("")
             if suf in READY_VIDEO_EXT:
                 self.dvd_var.set(
-                    "Lose Datei (Format OK) — Jahr/IMDb oder → Pending wickelt in Ordner"
+                    "Loose file (ready) — Year/IMDb or → Pending wraps into a folder"
                 )
-                self.status_var.set("DATEI · FORMAT-OK")
+                self.status_var.set("FILE · READY")
             elif suf in FFMPEG_CONVERT_EXTS or suf in {".iso", ".img"}:
                 self.dvd_var.set(
-                    "Lose Datei — „→ mp4“ / Pending wickelt zuerst in Ordner"
+                    "Loose file — “→ mp4” / Pending wraps into a folder first"
                 )
-                self.status_var.set("DATEI · →mp4")
+                self.status_var.set("FILE · →mp4")
             else:
-                self.dvd_var.set("Lose Mediendatei")
-                self.status_var.set("DATEI")
+                self.dvd_var.set("Loose media file")
+                self.status_var.set("FILE")
             return
 
         is_dvd = has_dvd_structure(folder)
@@ -961,11 +962,11 @@ class TriageApp(tk.Tk):
         convert = needs_media_convert(folder)
         status_bits = []
         if ready:
-            status_bits.append("Format OK (mkv/avi/mp4) — Rename/Pending noch nötig")
+            status_bits.append("Ready (mkv/avi/mp4) — rename/Pending still needed")
         if is_xc:
             status_bits.append(
-                "ratDVD (.VSI/XC, kein echtes MPEG-DVD) — „→ mp4“ geht nicht; "
-                "Original-.ratDVD + ratDVD-App nötig"
+                "ratDVD (.VSI/XC, not a real MPEG-DVD) — “→ mp4” cannot work; "
+                "Need original .ratDVD + ratDVD app"
             )
         elif convert:
             bits = []
@@ -976,12 +977,12 @@ class TriageApp(tk.Tk):
             if is_dvd:
                 bits.append("DVD/ISO")
             status_bits.append(
-                "Noch Umzuwandeln (" + "+".join(bits) + ") — „→ mp4“ / Batch Medien→mp4"
+                "Needs convert (" + "+".join(bits) + ") — “→ mp4” / Batch media→mp4"
             )
         elif multi:
-            status_bits.append("Als Multi-Movie-DVD-Set gemeldet")
+            status_bits.append("Reported as multi-movie DVD set")
         elif not ready and folder.is_dir() and not is_effectively_empty(folder):
-            status_bits.append("Kein mkv/avi/mp4 — weder Format-OK noch bekannte Convert-Quelle")
+            status_bits.append("No mkv/avi/mp4 — neither ready nor a known convert source")
         self.dvd_var.set(" · ".join(status_bits))
         m = re.search(r"\((\d{4})\)", name)
         if m:
@@ -1010,7 +1011,7 @@ class TriageApp(tk.Tk):
         self.imdb_var.set(existing_id)
         self.files.delete(0, "end")
         if not folder.is_dir():
-            self.status_var.set("Ordner fehlt unter Filme/")
+            self.status_var.set("Folder missing under Source/")
             return
         for rat in find_ratdvds(folder):
             self.files.insert("end", rat.name + " [ratDVD]")
@@ -1021,7 +1022,7 @@ class TriageApp(tk.Tk):
             except ValueError:
                 self.files.insert("end", src.name + f" [{tag}]")
         if is_dvd:
-            self.files.insert("end", "(DVD-Struktur erkannt)")
+            self.files.insert("end", "(DVD structure detected)")
             for marker in ("VIDEO_TS", "AUDIO_TS"):
                 if (folder / marker).is_dir():
                     self.files.insert("end", marker + "/")
@@ -1040,14 +1041,14 @@ class TriageApp(tk.Tk):
             self.files.insert("end", str(rel) + tag)
         parts = []
         if is_effectively_empty(folder):
-            parts.append("LEER")
+            parts.append("EMPTY")
         if ready:
-            parts.append(f"FORMAT-OK ({len(ready_videos)})")
+            parts.append(f"READY ({len(ready_videos)})")
         if convert:
             parts.append("→mp4")
         if is_dvd:
             parts.append("DVD/ISO")
-        parts.append(f"{len(videos)} Video(s)" if videos else "keine normalen Videos")
+        parts.append(f"{len(videos)} video(s)" if videos else "no normal videos")
         self.status_var.set(" · ".join(parts))
 
     def open_folder(self):
@@ -1055,16 +1056,16 @@ class TriageApp(tk.Tk):
         if not name:
             return
         if is_loose_media_name(name):
-            path = FILME / name
+            path = SOURCE / name
             if path.is_file():
                 subprocess.Popen(["xdg-open", str(path.parent)])
                 return
         name = self.ensure_movie_folder(name)
         if not name:
             return
-        folder = FILME / name
+        folder = SOURCE / name
         if not folder.is_dir():
-            messagebox.showerror("Fehler", f"Ordner fehlt:\n{folder}")
+            messagebox.showerror("Error", f"Folder missing:\n{folder}")
             return
         subprocess.Popen(["xdg-open", str(folder)])
 
@@ -1073,11 +1074,11 @@ class TriageApp(tk.Tk):
         if not name:
             return
         if is_loose_media_name(name):
-            path = FILME / name
+            path = SOURCE / name
             if path.is_file():
                 subprocess.Popen(["xdg-open", str(path)])
                 return
-        folder = FILME / name
+        folder = SOURCE / name
         videos = find_videos(folder, limit=1)
         if videos:
             subprocess.Popen(["xdg-open", str(videos[0])])
@@ -1086,7 +1087,7 @@ class TriageApp(tk.Tk):
         if isos:
             subprocess.Popen(["xdg-open", str(isos[0])])
             return
-        messagebox.showinfo("Info", "Kein Video/ISO gefunden")
+        messagebox.showinfo("Info", "No video/ISO found")
 
     def play_selected_file(self):
         name = self.selected_name()
@@ -1096,7 +1097,7 @@ class TriageApp(tk.Tk):
         rel = self.files.get(sel[0])
         if rel.startswith("(") or rel.endswith("/"):
             return
-        path = FILME / name / rel
+        path = SOURCE / name / rel
         if path.is_file():
             subprocess.Popen(["xdg-open", str(path)])
 
@@ -1112,23 +1113,23 @@ class TriageApp(tk.Tk):
         if imdb_raw:
             m = re.search(r"(tt\d{7,9})", imdb_raw, flags=re.IGNORECASE)
             if not m:
-                messagebox.showerror("Fehler", "IMDb-ID erwartet, z.B. tt0089563")
+                messagebox.showerror("Error", "IMDb ID expected, e.g. tt0089563")
                 return
             imdb_id = m.group(1).lower()
 
         if year and not re.fullmatch(r"19\d{2}|20\d{2}", year):
-            messagebox.showerror("Fehler", "Jahr muss 19xx/20xx sein (oder leer lassen)")
+            messagebox.showerror("Error", "Year must be 19xx/20xx (or leave empty)")
             return
         if not year and not imdb_id:
-            messagebox.showerror("Fehler", "Jahr und/oder IMDb-ID eintragen")
+            messagebox.showerror("Error", "Enter year and/or IMDb ID")
             return
 
         name = self.ensure_movie_folder(name)
         if not name:
             return
-        folder = FILME / name
+        folder = SOURCE / name
         if not folder.is_dir():
-            messagebox.showerror("Fehler", f"Ordner fehlt:\n{folder}")
+            messagebox.showerror("Error", f"Folder missing:\n{folder}")
             return
 
         new_name = name
@@ -1138,20 +1139,20 @@ class TriageApp(tk.Tk):
             base = re.sub(r"\s*\(\d{4}\)\s*$", "", name).strip()
             base = re.sub(r"[_\s.-](19\d{2}|20\d{2})$", "", base).strip()
             new_name = f"{base} ({year})"
-            dest = FILME / new_name
+            dest = SOURCE / new_name
             if dest.resolve() != folder.resolve():
                 if dest.exists():
-                    messagebox.showerror("Fehler", f"Ziel existiert schon:\n{dest}")
+                    messagebox.showerror("Error", f"Target already exists:\n{dest}")
                     return
                 try:
                     folder.rename(dest)
                 except OSError as exc:
-                    messagebox.showerror("Fehler", f"Rename fehlgeschlagen:\n{exc}")
+                    messagebox.showerror("Error", f"Rename failed:\n{exc}")
                     return
                 folder = dest
-                notes.append(f"Jahr→{new_name}")
+                notes.append(f"Year→{new_name}")
             else:
-                notes.append(f"Jahr ok ({year})")
+                notes.append(f"Year ok ({year})")
 
         if imdb_id:
             nfo = folder / "movie.nfo"
@@ -1164,7 +1165,7 @@ class TriageApp(tk.Tk):
                     encoding="utf-8",
                 )
             except OSError as exc:
-                messagebox.showerror("Fehler", f"Konnte movie.nfo nicht schreiben:\n{exc}")
+                messagebox.showerror("Error", f"Could not write movie.nfo:\n{exc}")
                 return
             notes.append(f"IMDb {imdb_id}")
 
@@ -1172,7 +1173,7 @@ class TriageApp(tk.Tk):
         if new_name != name:
             self.remove_from_skip_archive(new_name)
         self.queue_for_batch(new_name)
-        self.folders = scan_filme_folders()
+        self.folders = scan_source_folders()
         self.refresh_list(select_index=0)
         if new_name in self.filtered:
             idx = self.filtered.index(new_name)
@@ -1189,15 +1190,15 @@ class TriageApp(tk.Tk):
         name = self.ensure_movie_folder(name)
         if not name:
             return
-        folder = FILME / name
+        folder = SOURCE / name
         if not folder.is_dir():
-            messagebox.showerror("Fehler", "Ordner fehlt")
+            messagebox.showerror("Error", "Folder missing")
             return
         if needs_media_convert(folder) and not has_ready_video(folder):
             if not messagebox.askyesno(
-                "Noch Umzuwandeln",
-                f"Kein mkv/avi/mp4 — erst ISO/DVD/ratDVD/DivX/mpg/mpeg wandeln?\n"
-                f"Trotzdem in Pending?\n\n{name}",
+                "Needs convert",
+                f"No mkv/avi/mp4 — convert ISO/DVD/ratDVD/DivX/mpg/mpeg first?\n"
+                f"Add to Pending anyway?\n\n{name}",
             ):
                 return
         self.remove_from_skip_archive(name)
@@ -1218,12 +1219,12 @@ class TriageApp(tk.Tk):
             return
         idx = self.selected_index() or 0
         if not messagebox.askyesno(
-            "Später ansehen",
-            f"Zur manuellen Nacharbeit merken?\n"
-            f"(aus Pending entfernt, Ansicht „Später“)\n\n{name}",
+            "Review later",
+            f"Park for manual review?\n"
+            f"(removed from Pending, View “Later”)\n\n{name}",
         ):
             return
-        append_manual_later(name, "manuell")
+        append_manual_later(name, "manual")
         self.manual_later = load_manual_later_names()
         if name in self.pending:
             self.pending = [n for n in self.pending if n != name]
@@ -1231,7 +1232,7 @@ class TriageApp(tk.Tk):
             self.update_batch_button()
         self.remove_from_skip_archive(name)
         self.refresh_list(select_index=idx)
-        self.status_var.set(f"Später: {name}")
+        self.status_var.set(f"Later: {name}")
 
     def folder_needs_media_convert(self, folder: Path) -> bool:
         return needs_media_convert(folder)
@@ -1243,45 +1244,45 @@ class TriageApp(tk.Tk):
         name = self.ensure_movie_folder(name)
         if not name:
             return
-        folder = FILME / name
+        folder = SOURCE / name
         if not self.folder_needs_media_convert(folder):
             messagebox.showinfo(
                 "mp4",
-                "Kein divx/mpg/mpeg / ratDVD / VIDEO_TS / ISO in diesem Ordner.",
+                "No divx/mpg/mpeg / ratDVD / VIDEO_TS / ISO in this folder.",
             )
             return
         if not MEDIA_TO_MP4.is_file():
-            messagebox.showerror("Fehler", f"Fehlt: {MEDIA_TO_MP4}")
+            messagebox.showerror("Error", f"Missing: {MEDIA_TO_MP4}")
             return
         if not messagebox.askyesno(
             "→ mp4",
-            f"Nach MP4 wandeln (Deutsch, ohne Untertitel)?\n"
-            f"Quellen (divx/mpg/mpeg/DVD/ratDVD/ISO) werden danach entfernt.\n\n{name}",
+            f"Convert to MP4 (German audio, no subtitles)?\n"
+            f"Sources (divx/mpg/mpeg/DVD/ratDVD/ISO) are removed afterwards.\n\n{name}",
         ):
             return
         self._start_media_convert([folder], title=f"mp4: {name}")
 
     def run_media_convert_batch(self):
         if not MEDIA_TO_MP4.is_file():
-            messagebox.showerror("Fehler", f"Fehlt: {MEDIA_TO_MP4}")
+            messagebox.showerror("Error", f"Missing: {MEDIA_TO_MP4}")
             return
         targets = [
-            FILME / name
+            SOURCE / name
             for name in self.folders
-            if self.folder_needs_media_convert(FILME / name)
+            if self.folder_needs_media_convert(SOURCE / name)
         ]
         if not targets:
-            messagebox.showinfo("Batch Medien→mp4", "Nichts zu konvertieren.")
+            messagebox.showinfo("Batch media→mp4", "Nothing to convert.")
             return
         preview = "\n".join(p.name for p in targets[:20])
         if len(targets) > 20:
-            preview += f"\n… +{len(targets) - 20} weitere"
+            preview += f"\n… +{len(targets) - 20} more"
         if not messagebox.askyesno(
-            "Batch Medien→mp4",
-            f"{len(targets)} Ordner nach MP4 (Deutsch, ohne Subs)?\n\n{preview}",
+            "Batch media→mp4",
+            f"Convert {len(targets)} folders to MP4 (German audio, no subs)?\n\n{preview}",
         ):
             return
-        self._start_media_convert(targets, title=f"Medien→mp4 ×{len(targets)}")
+        self._start_media_convert(targets, title=f"media→mp4 ×{len(targets)}")
 
     def _start_media_convert(self, folders: list, title: str):
         win = BatchProgressWindow(self, [p.name for p in folders])
@@ -1290,7 +1291,7 @@ class TriageApp(tk.Tk):
 
         def worker():
             ok = True
-            summary = "Fertig"
+            summary = "Done"
             try:
                 for i, folder in enumerate(folders, 1):
                     win.set_phase(f"[{i}/{len(folders)}] {folder.name}", i - 1)
@@ -1311,8 +1312,8 @@ class TriageApp(tk.Tk):
                     if rc != 0:
                         ok = False
                         win.log(f"ERROR exit {rc}")
-                win.set_phase("Fertig", len(folders))
-                summary = f"{'OK' if ok else 'Mit Fehlern'} — {len(folders)} Ordner"
+                win.set_phase("Done", len(folders))
+                summary = f"{'OK' if ok else 'With errors'} — {len(folders)} folders"
             except Exception as exc:
                 ok = False
                 win.log(f"ERROR: {exc}")
@@ -1323,23 +1324,23 @@ class TriageApp(tk.Tk):
         threading.Thread(target=worker, daemon=True).start()
 
     def _media_convert_finished(self):
-        self.folders = scan_filme_folders()
+        self.folders = scan_source_folders()
         self.refresh_list(select_index=0)
-        self.status_var.set("Medien→mp4 Batch fertig — Rescan ok")
+        self.status_var.set("media→mp4 batch done — rescan ok")
 
     def delete_folder(self):
         name = self.selected_name()
         if not name:
             return
         idx = self.selected_index() or 0
-        folder = FILME / name
+        folder = SOURCE / name
         if is_loose_media_name(name) and folder.is_file():
-            if not messagebox.askyesno("Datei löschen?", f"Lose Datei LÖSCHEN?\n\n{folder}"):
+            if not messagebox.askyesno("Delete file?", f"DELETE loose file?\n\n{folder}"):
                 return
             try:
                 folder.unlink()
             except OSError as exc:
-                messagebox.showerror("Fehler", f"Löschen fehlgeschlagen:\n{exc}")
+                messagebox.showerror("Error", f"Delete failed:\n{exc}")
                 return
             self.remove_from_skip_archive(name)
             if name in self.pending:
@@ -1348,25 +1349,25 @@ class TriageApp(tk.Tk):
             if name in self.manual_later:
                 remove_manual_later(name)
                 self.manual_later = load_manual_later_names()
-            self.folders = scan_filme_folders()
+            self.folders = scan_source_folders()
             self.refresh_list(select_index=idx)
-            self.status_var.set(f"Gelöscht: {name}")
+            self.status_var.set(f"Deleted: {name}")
             return
         if not folder.is_dir():
-            if messagebox.askyesno("Nur Liste", f"Ordner fehlt. Nur aus Skip-Liste?\n\n{name}"):
+            if messagebox.askyesno("List only", f"Folder missing. Remove from skip list only?\n\n{name}"):
                 self.remove_from_triage(name, select_next_from=idx)
             return
         empty = is_effectively_empty(folder)
         warn = (
-            f"Ordner LÖSCHEN?\n\n{folder}\n\n"
-            + ("Sieht leer aus." if empty else "WARNUNG: Enthält noch Dateien!")
+            f"DELETE folder?\n\n{folder}\n\n"
+            + ("Looks empty." if empty else "WARNING: Still contains files!")
         )
-        if not messagebox.askyesno("Ordner löschen?", warn):
+        if not messagebox.askyesno("Delete folder?", warn):
             return
         try:
             shutil.rmtree(folder)
         except OSError as exc:
-            messagebox.showerror("Fehler", f"Löschen fehlgeschlagen:\n{exc}")
+            messagebox.showerror("Error", f"Delete failed:\n{exc}")
             return
         self.remove_from_skip_archive(name)
         if name in self.pending:
@@ -1375,9 +1376,9 @@ class TriageApp(tk.Tk):
         if name in self.manual_later:
             remove_manual_later(name)
             self.manual_later = load_manual_later_names()
-        self.folders = scan_filme_folders()
+        self.folders = scan_source_folders()
         self.refresh_list(select_index=idx)
-        self.status_var.set(f"Gelöscht: {name}")
+        self.status_var.set(f"Deleted: {name}")
 
     def unskip(self):
         name = self.selected_name()
@@ -1385,23 +1386,23 @@ class TriageApp(tk.Tk):
             return
         idx = self.selected_index() or 0
         if name not in self.skip_set:
-            messagebox.showinfo("Unskip", "Nicht in der Skip-Liste — nutze „→ Pending“.")
+            messagebox.showinfo("Unskip", "Not in the skip list — use “→ Pending”.")
             return
         if not messagebox.askyesno(
             "Unskip",
-            f"Aus permanent_skipped nehmen und in Pending?\n\n{name}",
+            f"Remove from permanent_skipped and add to Pending?\n\n{name}",
         ):
             return
         self.remove_from_skip_archive(name)
         name = self.ensure_movie_folder(name) or name
-        if (FILME / name).is_dir():
+        if (SOURCE / name).is_dir():
             self.queue_for_batch(name)
         self.refresh_list(select_index=idx)
         self.status_var.set(f"Unskip → pending {len(self.pending)}")
 
     def run_batch(self):
         if self.batch_running:
-            messagebox.showinfo("Batch", "Läuft bereits.")
+            messagebox.showinfo("Batch", "Already running.")
             return
         # Wrap any loose pending files into folders first.
         wrapped = []
@@ -1410,7 +1411,7 @@ class TriageApp(tk.Tk):
                 try:
                     new = wrap_loose_media(n)
                 except (OSError, RuntimeError, FileNotFoundError) as exc:
-                    messagebox.showerror("Pending", f"Wrap fehlgeschlagen für {n}:\n{exc}")
+                    messagebox.showerror("Pending", f"Wrap failed for {n}:\n{exc}")
                     return
                 if new != n:
                     self.retarget_tracked(n, new)
@@ -1420,28 +1421,28 @@ class TriageApp(tk.Tk):
         self.pending = list(dict.fromkeys(wrapped))
         save_pending(self.pending)
         # Drop pending entries whose folders vanished
-        alive = [n for n in self.pending if (FILME / n).is_dir()]
+        alive = [n for n in self.pending if (SOURCE / n).is_dir()]
         missing = [n for n in self.pending if n not in alive]
         self.pending = alive
         save_pending(self.pending)
         self.update_batch_button()
         if missing:
-            messagebox.showwarning("Pending", "Nicht mehr in Filme (übersprungen):\n" + "\n".join(missing[:12]))
+            messagebox.showwarning("Pending", "No longer in Source (skipped):\n" + "\n".join(missing[:12]))
         if not self.pending:
-            messagebox.showinfo("Batch", "Pending ist leer.\nErst Jahr setzen oder Unskip.")
+            messagebox.showinfo("Batch", "Pending is empty.\nSet year first or Unskip.")
             return
         titles = list(self.pending)
         if not messagebox.askyesno(
-            "Batch starten",
-            f"Genau {len(titles)} Ordner verarbeiten?\n\n" + "\n".join(titles[:15])
+            "Start batch",
+            f"Process exactly {len(titles)} folders?\n\n" + "\n".join(titles[:15])
             + ("\n…" if len(titles) > 15 else ""),
         ):
             return
         if not RENAMER.is_file():
-            messagebox.showerror("Fehler", f"Fehlt: {RENAMER}")
+            messagebox.showerror("Error", f"Missing: {RENAMER}")
             return
-        if not MOVIES.is_dir():
-            messagebox.showerror("Fehler", f"Movies fehlt: {MOVIES}")
+        if not DESTINATION.is_dir():
+            messagebox.showerror("Error", f"Destination missing: {DESTINATION}")
             return
 
         win = BatchProgressWindow(self, titles)
@@ -1450,12 +1451,12 @@ class TriageApp(tk.Tk):
 
         def worker():
             ok = False
-            summary = "Abbruch"
+            summary = "Cancelled"
             try:
                 WORK.mkdir(parents=True, exist_ok=True)
                 batch_list = WORK / "gui_pending_list.txt"
                 batch_list.write_text(
-                    "# BASE_PATH=%s\n%s\n" % (FILME, "\n".join(titles)),
+                    "# BASE_PATH=%s\n%s\n" % (SOURCE, "\n".join(titles)),
                     encoding="utf-8",
                 )
                 win.set_phase(f"Dry-run ({len(titles)})…", 0)
@@ -1474,14 +1475,14 @@ class TriageApp(tk.Tk):
                 movable = parse_movable(success, backlog)
                 win.log(f"Movable: {len(movable)}")
                 if not movable:
-                    summary = "Keine movable Successes"
+                    summary = "No movable successes"
                     win.done(False, summary)
                     return
 
                 exec_list = WORK / "gui_pending_execute.txt"
                 exec_list.write_text(
                     "# BASE_PATH=%s\n%s\n" % (
-                        FILME,
+                        SOURCE,
                         "\n".join(orig for orig, _new in movable),
                     ),
                     encoding="utf-8",
@@ -1497,18 +1498,18 @@ class TriageApp(tk.Tk):
                     win,
                 )
 
-                win.set_phase("Move nach Movies…", 0)
+                win.set_phase("Move to Destination…", 0)
                 win.log("=== MOVE ===")
                 moved = 0
                 for i, (_orig, new) in enumerate(movable, 1):
-                    src = FILME / new
-                    dst = MOVIES / new
+                    src = SOURCE / new
+                    dst = DESTINATION / new
                     if src.exists():
                         if dst.exists():
-                            win.log(f"ALREADY in Movies — remove Filme leftover: {new}")
+                            win.log(f"ALREADY in Destination — remove Source leftover: {new}")
                             shutil.rmtree(src)
                         else:
-                            shutil.move(str(src), str(MOVIES))
+                            shutil.move(str(src), str(DESTINATION))
                             win.log(f"MOVED: {new}")
                             moved += 1
                     else:
@@ -1519,10 +1520,10 @@ class TriageApp(tk.Tk):
                 self.pending = [n for n in load_pending() if n not in titles]
                 save_pending(self.pending)
                 ok = True
-                summary = f"Fertig — {moved} verschoben, {len(movable)} execute"
+                summary = f"Done — {moved} moved, {len(movable)} execute"
             except Exception as exc:
                 win.log(f"ERROR: {exc}")
-                summary = f"Fehler: {exc}"
+                summary = f"Error: {exc}"
             finally:
                 win.done(ok, summary)
                 self.after(0, self._batch_finished)
@@ -1556,10 +1557,10 @@ class TriageApp(tk.Tk):
     def _batch_finished(self):
         self.batch_running = False
         self.pending = load_pending()
-        self.folders = scan_filme_folders()
+        self.folders = scan_source_folders()
         self.refresh_list(select_index=0)
         self.update_batch_button()
-        self.status_var.set(f"Batch fertig · pending {len(self.pending)}")
+        self.status_var.set(f"Batch done · pending {len(self.pending)}")
 
     def next_item(self):
         sel = self.selected_index()
@@ -1567,7 +1568,7 @@ class TriageApp(tk.Tk):
             return
         nxt = sel + 1
         if nxt >= self.listbox.size():
-            self.status_var.set("Ende der Liste")
+            self.status_var.set("End of list")
             return
         self.listbox.selection_clear(0, "end")
         self.listbox.selection_set(nxt)
