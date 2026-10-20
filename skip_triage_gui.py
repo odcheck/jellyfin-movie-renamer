@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""GUI to triage permanent IMDb skips: year, DVD, delete, pending batch with live progress."""
+"""GUI to triage Filme/: format gate, convert, pending rename batch, manual-later queue."""
 import os
 import queue
 import re
@@ -15,12 +15,14 @@ MOVIES = Path(os.environ.get("MOVIES", "/path/to/Destination"))
 WORK = Path(os.environ.get("WORK_DIR", Path.home() / "filme_batch_work"))
 SKIP_ARCHIVE = Path(os.environ.get("SKIP_ARCHIVE", WORK / "permanent_skipped.txt"))
 REASONS_FILE = Path(os.environ.get("REASONS_FILE", WORK / "skipped_reasons.txt"))
-DVD_QUEUE = Path(os.environ.get("DVD_QUEUE", WORK / "dvd_manual.txt"))
+MANUAL_LATER = Path(os.environ.get("MANUAL_LATER", WORK / "manual_later.txt"))
 PENDING_FILE = Path(os.environ.get("PENDING_FILE", WORK / "pending_batch.txt"))
 SCRIPT_DIR = Path(__file__).resolve().parent
 RENAMER = SCRIPT_DIR / "movie_renamer.py"
 MEDIA_TO_MP4 = SCRIPT_DIR / "media_to_mp4.py"
-VIDEO_EXT = {".mkv", ".mp4", ".avi", ".mov", ".m4v", ".wmv", ".mpg", ".mpeg", ".m2ts", ".ts", ".divx"}
+# Jellyfin-ok containers that skip convert and may go to rename/pending.
+READY_VIDEO_EXT = {".mkv", ".mp4", ".avi"}
+VIDEO_EXT = READY_VIDEO_EXT | {".mov", ".m4v", ".wmv", ".mpg", ".mpeg", ".m2ts", ".ts", ".divx"}
 IGNORABLE_NAMES = {".@", "@eaDir", "Thumbs.db", "desktop.ini", ".DS_Store"}
 
 
@@ -73,23 +75,44 @@ def save_pending(names):
     PENDING_FILE.write_text("".join(n + "\n" for n in names), encoding="utf-8")
 
 
-def load_dvd_queue_names():
-    if not DVD_QUEUE.is_file():
+def load_manual_later_names():
+    if not MANUAL_LATER.is_file():
         return set()
     return {
         line.split(" | ", 1)[0].strip()
-        for line in DVD_QUEUE.read_text(encoding="utf-8", errors="ignore").splitlines()
+        for line in MANUAL_LATER.read_text(encoding="utf-8", errors="ignore").splitlines()
         if line.strip()
     }
 
 
-def append_dvd_queue(name, note=""):
-    DVD_QUEUE.parent.mkdir(parents=True, exist_ok=True)
-    existing = load_dvd_queue_names()
+def append_manual_later(name, note=""):
+    MANUAL_LATER.parent.mkdir(parents=True, exist_ok=True)
+    existing = load_manual_later_names()
     if name in existing:
         return
-    with DVD_QUEUE.open("a", encoding="utf-8") as handle:
+    with MANUAL_LATER.open("a", encoding="utf-8") as handle:
         handle.write(f"{name} | {note}\n" if note else f"{name}\n")
+
+
+def remove_manual_later(name):
+    if not MANUAL_LATER.is_file() or name not in load_manual_later_names():
+        return
+    kept = []
+    for line in MANUAL_LATER.read_text(encoding="utf-8", errors="ignore").splitlines():
+        raw = line.strip()
+        if not raw:
+            continue
+        entry = raw.split(" | ", 1)[0].strip()
+        if entry != name:
+            kept.append(raw)
+    MANUAL_LATER.write_text("".join(n + "\n" for n in kept), encoding="utf-8")
+
+
+# Loose files sometimes sit in Filme/; skip by suffix so we never stat (NFS hangs).
+_SCAN_SKIP_SUFFIXES = VIDEO_EXT | {
+    ".iso", ".img", ".nfo", ".txt", ".jpg", ".jpeg", ".png", ".srt", ".sfv", ".xml",
+    ".metathumb",  # XBMC/Kodi thumbnail sidecar next to loose .avi etc.
+}
 
 
 def scan_filme_folders():
@@ -97,13 +120,18 @@ def scan_filme_folders():
     if not FILME.is_dir():
         return []
     names = []
-    for path in sorted(FILME.iterdir(), key=lambda p: p.name.lower()):
-        if not path.is_dir():
-            continue
-        if path.name.startswith(".") or path.name.startswith("@"):
-            continue
-        names.append(path.name)
-    return names
+    try:
+        with os.scandir(FILME) as entries:
+            for entry in entries:
+                if entry.name.startswith(".") or entry.name.startswith("@"):
+                    continue
+                # Avoid entry.is_dir() — NFS hard-mount can block forever on stale dentries.
+                if Path(entry.name).suffix.lower() in _SCAN_SKIP_SUFFIXES:
+                    continue
+                names.append(entry.name)
+    except OSError:
+        return []
+    return sorted(names, key=str.lower)
 
 
 def find_ratdvds(folder: Path):
@@ -112,12 +140,28 @@ def find_ratdvds(folder: Path):
     return sorted(folder.glob("*.ratDVD")) + sorted(folder.glob("*.ratdvd"))
 
 
-def find_divx_files(folder: Path):
+def is_ratdvd_xc(folder: Path) -> bool:
+    """ratDVD XC unpack (fake VOBs) — cannot HandBrake/ffmpeg to mp4."""
+    for ver in (folder / "Version.xml",):
+        try:
+            if ver.is_file() and "<videoformat>XC</videoformat>" in ver.read_text(
+                encoding="utf-8", errors="ignore"
+            ):
+                return True
+        except OSError:
+            pass
+    return False
+
+
+FFMPEG_CONVERT_EXTS = {".divx", ".mpg", ".mpeg"}
+
+
+def find_ffmpeg_convert_files(folder: Path):
     if not folder.is_dir():
         return []
     found = []
     for path in folder.rglob("*"):
-        if not path.is_file() or path.suffix.lower() != ".divx":
+        if not path.is_file() or path.suffix.lower() not in FFMPEG_CONVERT_EXTS:
             continue
         if any(p.startswith(".") or p.startswith("@") for p in path.parts):
             continue
@@ -125,38 +169,175 @@ def find_divx_files(folder: Path):
     return sorted(found)
 
 
+def find_divx_files(folder: Path):
+    """Back-compat: divx only."""
+    return [p for p in find_ffmpeg_convert_files(folder) if p.suffix.lower() == ".divx"]
+
+
+def _dvd_files_present(dir_path: Path) -> bool:
+    """True when dir has VIDEO_TS.IFO plus at least one VTS_*.VOB."""
+    try:
+        names = {p.name.upper() for p in dir_path.iterdir() if p.is_file()}
+    except OSError:
+        return False
+    if "VIDEO_TS.IFO" not in names:
+        return False
+    return any(n.startswith("VTS_") and n.endswith(".VOB") for n in names)
+
+
 def has_dvd_structure(folder: Path) -> bool:
+    """True for real DVD layouts (IFO+VOB) or ISO — not empty VIDEO_TS stubs."""
     if not folder.is_dir():
         return False
     try:
-        if (folder / "VIDEO_TS").is_dir():
+        if _dvd_files_present(folder):
+            return True
+        video_ts = folder / "VIDEO_TS"
+        if video_ts.is_dir() and _dvd_files_present(video_ts):
             return True
         for child in folder.iterdir():
-            if child.is_file() and child.name.upper() == "VIDEO_TS.IFO":
-                return True
-            if child.is_dir() and child.name.upper() == "VIDEO_TS":
-                return True
-            if child.is_dir() and (child / "VIDEO_TS").is_dir():
-                return True
             if child.is_file() and child.suffix.lower() == ".iso":
                 return True
+            if child.is_dir():
+                if child.name.upper() == "VIDEO_TS" and _dvd_files_present(child):
+                    return True
+                nested = child / "VIDEO_TS"
+                if nested.is_dir() and _dvd_files_present(nested):
+                    return True
     except OSError:
         return False
     return False
 
 
-def find_videos(folder: Path, limit=20):
+def find_videos(folder: Path, limit=20, exts=None):
     if not folder.is_dir():
         return []
+    allowed = exts if exts is not None else VIDEO_EXT
     found = []
     for root, dirs, files in os.walk(folder):
         dirs[:] = [d for d in dirs if not d.startswith(".") and not d.startswith("@")]
         for name in files:
-            if Path(name).suffix.lower() in VIDEO_EXT:
+            if Path(name).suffix.lower() in allowed:
                 found.append(Path(root) / name)
                 if len(found) >= limit:
                     return found
     return found
+
+
+def has_ready_video(folder: Path) -> bool:
+    """True when folder already has a Jellyfin-ok container (mkv/mp4/avi)."""
+    return bool(find_videos(folder, limit=1, exts=READY_VIDEO_EXT))
+
+
+def has_bluray_stream(folder: Path) -> bool:
+    for candidate in (folder / "STREAM", folder / "BDMV" / "STREAM"):
+        if not candidate.is_dir():
+            continue
+        try:
+            if any(p.is_file() and p.suffix.lower() == ".m2ts" for p in candidate.iterdir()):
+                return True
+        except OSError:
+            continue
+    return False
+
+
+def needs_media_convert(folder: Path) -> bool:
+    """ISO / VIDEO_TS / ratDVD / DivX / mpg / mpeg / m2ts still need convert before rename is ideal."""
+    return bool(
+        find_ffmpeg_convert_files(folder)
+        or find_ratdvds(folder)
+        or has_dvd_structure(folder)
+        or has_bluray_stream(folder)
+    )
+
+
+def peek_folder_media(folder: Path) -> dict:
+    """
+    One shallow pass for list tags / view filters (NFS-friendly).
+    Does not recurse deep trees — detail pane still uses full checks.
+    """
+    out = {
+        "missing": False,
+        "empty": True,
+        "ready": False,
+        "convert": False,
+        "ratdvd": False,
+        "divx": False,
+        "dvd": False,
+    }
+    if not folder.is_dir():
+        out["missing"] = True
+        return out
+    try:
+        with os.scandir(folder) as entries:
+            for entry in entries:
+                name = entry.name
+                if name.startswith(".") or name.startswith("@"):
+                    continue
+                try:
+                    is_dir = entry.is_dir(follow_symlinks=False)
+                    is_file = entry.is_file(follow_symlinks=False)
+                except OSError:
+                    continue
+                if is_file:
+                    out["empty"] = False
+                    suf = Path(name).suffix.lower()
+                    if suf in READY_VIDEO_EXT:
+                        out["ready"] = True
+                    elif suf in FFMPEG_CONVERT_EXTS:
+                        out["convert"] = True
+                        if suf == ".divx":
+                            out["divx"] = True
+                    elif suf == ".iso":
+                        out["convert"] = True
+                        out["dvd"] = True
+                    elif suf == ".ratdvd":
+                        out["convert"] = True
+                        out["ratdvd"] = True
+                    elif suf in {".ifo", ".vob", ".bup"} or name.upper() == "VIDEO_TS.IFO":
+                        # Flat DVD layout (IFO/VOB in movie folder root)
+                        out["convert"] = True
+                        out["dvd"] = True
+                elif is_dir:
+                    out["empty"] = False
+                    upper = name.upper()
+                    if upper == "VIDEO_TS":
+                        out["convert"] = True
+                        out["dvd"] = True
+                    elif upper == "STREAM":
+                        out["convert"] = True
+                    elif upper == "BDMV":
+                        out["convert"] = True
+                    else:
+                        # one nested level (release subfolder / VIDEO_TS wrapper)
+                        try:
+                            nested_ts = Path(entry.path) / "VIDEO_TS"
+                            if nested_ts.is_dir():
+                                out["convert"] = True
+                                out["dvd"] = True
+                            with os.scandir(entry.path) as nested:
+                                for child in nested:
+                                    if child.name.startswith(".") or child.name.startswith("@"):
+                                        continue
+                                    try:
+                                        if not child.is_file(follow_symlinks=False):
+                                            continue
+                                    except OSError:
+                                        continue
+                                    suf = Path(child.name).suffix.lower()
+                                    if suf in READY_VIDEO_EXT:
+                                        out["ready"] = True
+                                    elif suf in FFMPEG_CONVERT_EXTS:
+                                        out["convert"] = True
+                                        if suf == ".divx":
+                                            out["divx"] = True
+                                    elif suf in {".iso", ".ratdvd"}:
+                                        out["convert"] = True
+                        except OSError:
+                            pass
+    except OSError:
+        out["missing"] = True
+    return out
 
 
 def is_effectively_empty(folder: Path) -> bool:
@@ -274,13 +455,13 @@ class TriageApp(tk.Tk):
         self.skips = load_skips()
         self.skip_set = set(self.skips)
         self.pending = load_pending()
-        self.dvd_parked = load_dvd_queue_names()
-        self.folders = scan_filme_folders()
-        self.filtered = list(self.folders)
+        self.manual_later = load_manual_later_names()
+        self.folders = []
+        self.filtered = []
         self.view_mode = tk.StringVar(value="Alle")
         self.batch_running = False
         self._build()
-        self.prune_stale_skips()
+        # Fast scandir (no per-row NFS walks). Deep media checks only on select / filtered views.
         self.rescan_filme(select_index=0)
 
     def _build(self):
@@ -294,7 +475,10 @@ class TriageApp(tk.Tk):
         view = ttk.Combobox(
             top,
             textvariable=self.view_mode,
-            values=("Alle", "Skip", "Ready", "Pending", "DVD/ratDVD", "Leer"),
+            values=(
+                "Alle", "Skip", "Ready", "Umwandeln", "Pending",
+                "Später", "Leer",
+            ),
             width=11,
             state="readonly",
         )
@@ -362,7 +546,7 @@ class TriageApp(tk.Tk):
         ttk.Button(btns, text="Ordner öffnen", command=self.open_folder).pack(side="left", padx=2)
         ttk.Button(btns, text="Video abspielen", command=self.play_video).pack(side="left", padx=2)
         ttk.Button(btns, text="→ Pending", command=self.add_to_pending).pack(side="left", padx=2)
-        ttk.Button(btns, text="Als DVD ablegen", command=self.mark_dvd).pack(side="left", padx=2)
+        ttk.Button(btns, text="Später ansehen", command=self.mark_later).pack(side="left", padx=2)
         ttk.Button(btns, text="→ mp4", command=self.convert_media_one).pack(side="left", padx=2)
         ttk.Button(btns, text="Ordner löschen", command=self.delete_folder).pack(side="left", padx=2)
         ttk.Button(btns, text="Unskip", command=self.unskip).pack(side="left", padx=2)
@@ -370,8 +554,9 @@ class TriageApp(tk.Tk):
 
         ttk.Label(
             detail,
-            text="Jahr/IMDb → Pending → Batch ×N (Rename). "
-                 "divx/DVD/ratDVD → „→ mp4“ oder „Batch Medien→mp4“ (Deutsch, ohne Subs).",
+            text="mkv/avi/mp4 = Format OK → Jahr/IMDb → Pending → Batch (Rename). "
+                 "ISO/DVD/ratDVD/DivX/mpg/mpeg = Noch Umzuwandeln → „→ mp4“. "
+                 "„Später ansehen“ = manuell.",
             wraplength=560,
         ).pack(anchor="w", pady=(2, 8))
 
@@ -386,6 +571,8 @@ class TriageApp(tk.Tk):
         """Remember a Filme folder for the next exact-size batch."""
         if not folder_name:
             return
+        remove_manual_later(folder_name)
+        self.manual_later = load_manual_later_names()
         if folder_name not in self.pending:
             self.pending.append(folder_name)
             save_pending(self.pending)
@@ -410,30 +597,18 @@ class TriageApp(tk.Tk):
         skip_n = sum(1 for n in self.folders if n in self.skip_set)
         self.count_var.set(
             f"{len(self.filtered)}/{len(self.folders)} Ordner · "
-            f"{skip_n} skip · pending {n}"
+            f"{skip_n} skip · pending {n} · später {len(self.manual_later)}"
         )
 
     def list_tag(self, name):
-        folder = FILME / name
+        # Memory-only tags here — filesystem peeks on every row freeze NFS startups.
         tags = []
         if name in self.pending:
             tags.append("PENDING")
-        if name in self.dvd_parked:
-            tags.append("GEPARKT")
+        if name in self.manual_later:
+            tags.append("SPÄTER")
         if name in self.skip_set:
             tags.append("SKIP")
-        elif name not in self.pending and name not in self.dvd_parked:
-            tags.append("READY")
-        if not folder.is_dir():
-            tags.append("FEHLT")
-        elif is_effectively_empty(folder):
-            tags.append("LEER")
-        if find_ratdvds(folder):
-            tags.append("ratDVD")
-        if find_divx_files(folder):
-            tags.append("divx")
-        if has_dvd_structure(folder):
-            tags.append("DVD")
         reason = self.reasons.get(name, "").lower()
         if "multi-movie" in reason:
             tags.append("DVD-SET")
@@ -441,24 +616,28 @@ class TriageApp(tk.Tk):
 
     def matches_view(self, name):
         mode = self.view_mode.get()
-        folder = FILME / name
         if mode == "Alle":
             return True
         if mode == "Skip":
             return name in self.skip_set
-        if mode == "Ready":
-            return name not in self.skip_set and name not in self.dvd_parked
         if mode == "Pending":
             return name in self.pending
-        if mode == "DVD/ratDVD":
-            return bool(find_ratdvds(folder) or has_dvd_structure(folder) or name in self.dvd_parked)
-        if mode == "Leer":
-            return is_effectively_empty(folder)
+        if mode == "Später":
+            return name in self.manual_later
+        if mode in {"Ready", "Umwandeln", "Leer"}:
+            peek = peek_folder_media(FILME / name)
+            if mode == "Ready":
+                return peek["ready"] and name not in self.manual_later
+            if mode == "Umwandeln":
+                return peek["convert"]
+            if mode == "Leer":
+                return peek["empty"] and not peek["missing"]
         return True
 
-    def prune_stale_skips(self):
-        """Remove skip/pending entries whose folders no longer exist under Filme/."""
-        stale = [n for n in self.skips if not (FILME / n).is_dir()]
+    def prune_stale_skips(self, present_names=None):
+        """Remove skip/pending entries whose folders are gone (use scan set, no NFS is_dir)."""
+        present = set(present_names if present_names is not None else self.folders)
+        stale = [n for n in self.skips if n not in present]
         if stale:
             self.skips = [n for n in self.skips if n not in stale]
             self.skip_set = set(self.skips)
@@ -466,10 +645,15 @@ class TriageApp(tk.Tk):
             for name in stale:
                 self.reasons.pop(name, None)
             save_reasons(self.reasons)
-        stale_pending = [n for n in self.pending if not (FILME / n).is_dir()]
+        stale_pending = [n for n in self.pending if n not in present]
         if stale_pending:
             self.pending = [n for n in self.pending if n not in stale_pending]
             save_pending(self.pending)
+        stale_later = [n for n in self.manual_later if n not in present]
+        if stale_later:
+            for name in stale_later:
+                remove_manual_later(name)
+            self.manual_later = load_manual_later_names()
         return stale, stale_pending
 
     def rescan_filme(self, select_index=0):
@@ -478,9 +662,9 @@ class TriageApp(tk.Tk):
         self.skips = load_skips()
         self.skip_set = set(self.skips)
         self.pending = load_pending()
-        self.dvd_parked = load_dvd_queue_names()
-        stale, stale_pending = self.prune_stale_skips()
+        self.manual_later = load_manual_later_names()
         self.folders = scan_filme_folders()
+        stale, stale_pending = self.prune_stale_skips(present_names=self.folders)
         self.refresh_list(select_index=select_index)
         msg = f"Rescan: {len(self.folders)} Ordner in Filme/"
         if stale:
@@ -559,32 +743,43 @@ class TriageApp(tk.Tk):
         if name in self.skip_set:
             self.reason_var.set(self.reasons.get(name, "(in Skip-Archiv, kein Reason-Text)"))
         elif name in self.pending:
-            self.reason_var.set("In Pending — bereit für Batch ×N")
-        elif name in self.dvd_parked:
-            self.reason_var.set("In dvd_manual.txt geparkt")
+            self.reason_var.set("In Pending — bereit für Batch ×N (Rename Titel/Jahr/IMDb)")
+        elif name in self.manual_later:
+            self.reason_var.set("Später ansehen — manuell nacharbeiten")
         else:
-            self.reason_var.set("READY — nicht in Skip-Liste (Batch/Jahr/Pending möglich)")
+            self.reason_var.set("In Filme/ — Format prüfen, dann Pending oder Umwandeln")
         self.path_var.set(str(folder))
         is_dvd = has_dvd_structure(folder)
+        is_xc = is_ratdvd_xc(folder)
         multi = "multi-movie" in self.reasons.get(name, "").lower()
         rats = find_ratdvds(folder)
-        divxs = find_divx_files(folder)
-        if rats or divxs or is_dvd:
+        ffmpeg_srcs = find_ffmpeg_convert_files(folder)
+        ready = has_ready_video(folder)
+        convert = needs_media_convert(folder)
+        status_bits = []
+        if ready:
+            status_bits.append("Format OK (mkv/avi/mp4) — Rename/Pending noch nötig")
+        if is_xc:
+            status_bits.append(
+                "ratDVD XC (kein echtes MPEG-DVD) — „→ mp4“ geht nicht; "
+                "Original-.ratDVD + ratDVD-App nötig"
+            )
+        elif convert:
             bits = []
             if rats:
                 bits.append("ratDVD")
-            if divxs:
-                bits.append("divx")
+            exts = sorted({p.suffix.lower().lstrip(".") for p in ffmpeg_srcs})
+            bits.extend(exts)
             if is_dvd:
-                bits.append("VIDEO_TS")
-            self.dvd_var.set(
-                " + ".join(bits) + " — „→ mp4“ (Deutsch, ohne Untertitel) "
-                "oder Batch Medien→mp4"
+                bits.append("DVD/ISO")
+            status_bits.append(
+                "Noch Umzuwandeln (" + "+".join(bits) + ") — „→ mp4“ / Batch Medien→mp4"
             )
         elif multi:
-            self.dvd_var.set("Als Multi-Movie-DVD-Set gemeldet")
-        else:
-            self.dvd_var.set("")
+            status_bits.append("Als Multi-Movie-DVD-Set gemeldet")
+        elif not ready and folder.is_dir() and not is_effectively_empty(folder):
+            status_bits.append("Kein mkv/avi/mp4 — weder Format-OK noch bekannte Convert-Quelle")
+        self.dvd_var.set(" · ".join(status_bits))
         m = re.search(r"\((\d{4})\)", name)
         if m:
             year_guess = m.group(1)
@@ -616,11 +811,12 @@ class TriageApp(tk.Tk):
             return
         for rat in find_ratdvds(folder):
             self.files.insert("end", rat.name + " [ratDVD]")
-        for divx in find_divx_files(folder):
+        for src in ffmpeg_srcs:
+            tag = src.suffix.lower().lstrip(".") or "convert"
             try:
-                self.files.insert("end", str(divx.relative_to(folder)) + " [divx]")
+                self.files.insert("end", str(src.relative_to(folder)) + f" [{tag}]")
             except ValueError:
-                self.files.insert("end", divx.name + " [divx]")
+                self.files.insert("end", src.name + f" [{tag}]")
         if is_dvd:
             self.files.insert("end", "(DVD-Struktur erkannt)")
             for marker in ("VIDEO_TS", "AUDIO_TS"):
@@ -629,17 +825,25 @@ class TriageApp(tk.Tk):
             for iso in sorted(folder.glob("*.iso")) + sorted(folder.glob("*.ISO")):
                 self.files.insert("end", iso.name)
         videos = find_videos(folder)
+        ready_videos = find_videos(folder, exts=READY_VIDEO_EXT)
         for path in videos:
             try:
                 rel = path.relative_to(folder)
             except ValueError:
                 rel = path.name
-            self.files.insert("end", str(rel))
+            tag = ""
+            if path.suffix.lower() in READY_VIDEO_EXT:
+                tag = " [OK]"
+            self.files.insert("end", str(rel) + tag)
         parts = []
         if is_effectively_empty(folder):
             parts.append("LEER")
+        if ready:
+            parts.append(f"FORMAT-OK ({len(ready_videos)})")
+        if convert:
+            parts.append("→mp4")
         if is_dvd:
-            parts.append("DVD")
+            parts.append("DVD/ISO")
         parts.append(f"{len(videos)} Video(s)" if videos else "keine normalen Videos")
         self.status_var.set(" · ".join(parts))
 
@@ -762,20 +966,46 @@ class TriageApp(tk.Tk):
         name = self.selected_name()
         if not name:
             return
-        if not (FILME / name).is_dir():
+        folder = FILME / name
+        if not folder.is_dir():
             messagebox.showerror("Fehler", "Ordner fehlt")
             return
+        if needs_media_convert(folder) and not has_ready_video(folder):
+            if not messagebox.askyesno(
+                "Noch Umzuwandeln",
+                f"Kein mkv/avi/mp4 — erst ISO/DVD/ratDVD/DivX/mpg/mpeg wandeln?\n"
+                f"Trotzdem in Pending?\n\n{name}",
+            ):
+                return
         self.remove_from_skip_archive(name)
         self.queue_for_batch(name)
         self.refresh_list(select_index=self.selected_index() or 0)
         self.status_var.set(f"→ Pending: {name} ({len(self.pending)})")
 
+    def mark_later(self):
+        """Park folder for manual review later (not pending, not convert batch)."""
+        name = self.selected_name()
+        if not name:
+            return
+        idx = self.selected_index() or 0
+        if not messagebox.askyesno(
+            "Später ansehen",
+            f"Zur manuellen Nacharbeit merken?\n"
+            f"(aus Pending entfernt, Ansicht „Später“)\n\n{name}",
+        ):
+            return
+        append_manual_later(name, "manuell")
+        self.manual_later = load_manual_later_names()
+        if name in self.pending:
+            self.pending = [n for n in self.pending if n != name]
+            save_pending(self.pending)
+            self.update_batch_button()
+        self.remove_from_skip_archive(name)
+        self.refresh_list(select_index=idx)
+        self.status_var.set(f"Später: {name}")
+
     def folder_needs_media_convert(self, folder: Path) -> bool:
-        return bool(
-            find_divx_files(folder)
-            or find_ratdvds(folder)
-            or has_dvd_structure(folder)
-        )
+        return needs_media_convert(folder)
 
     def convert_media_one(self):
         name = self.selected_name()
@@ -783,7 +1013,10 @@ class TriageApp(tk.Tk):
             return
         folder = FILME / name
         if not self.folder_needs_media_convert(folder):
-            messagebox.showinfo("mp4", "Kein divx / ratDVD / VIDEO_TS in diesem Ordner.")
+            messagebox.showinfo(
+                "mp4",
+                "Kein divx/mpg/mpeg / ratDVD / VIDEO_TS / ISO in diesem Ordner.",
+            )
             return
         if not MEDIA_TO_MP4.is_file():
             messagebox.showerror("Fehler", f"Fehlt: {MEDIA_TO_MP4}")
@@ -791,7 +1024,7 @@ class TriageApp(tk.Tk):
         if not messagebox.askyesno(
             "→ mp4",
             f"Nach MP4 wandeln (Deutsch, ohne Untertitel)?\n"
-            f"Quellen (divx/DVD/ratDVD) werden danach entfernt.\n\n{name}",
+            f"Quellen (divx/mpg/mpeg/DVD/ratDVD/ISO) werden danach entfernt.\n\n{name}",
         ):
             return
         self._start_media_convert([folder], title=f"mp4: {name}")
@@ -835,12 +1068,11 @@ class TriageApp(tk.Tk):
                         cwd=str(SCRIPT_DIR),
                         stdout=subprocess.PIPE,
                         stderr=subprocess.STDOUT,
-                        text=True,
-                        bufsize=1,
                     )
                     assert proc.stdout is not None
-                    for line in proc.stdout:
-                        win.log(line.rstrip("\n"))
+                    # HandBrake progress can emit non-UTF-8; never use text=True here.
+                    for raw in proc.stdout:
+                        win.log(raw.decode("utf-8", errors="replace").rstrip("\n"))
                     rc = proc.wait()
                     if rc != 0:
                         ok = False
@@ -860,28 +1092,6 @@ class TriageApp(tk.Tk):
         self.folders = scan_filme_folders()
         self.refresh_list(select_index=0)
         self.status_var.set("Medien→mp4 Batch fertig — Rescan ok")
-
-    def mark_dvd(self):
-        name = self.selected_name()
-        if not name:
-            return
-        idx = self.selected_index() or 0
-        folder = FILME / name
-        note = "dvd"
-        if has_dvd_structure(folder):
-            note = "VIDEO_TS/ISO erkannt"
-        if "multi-movie" in self.reasons.get(name, "").lower():
-            note = "multi-movie DVD set"
-        if not messagebox.askyesno(
-            "Als DVD ablegen",
-            f"Nach dvd_manual.txt (kein Batch)?\n\n{name}\n({note})",
-        ):
-            return
-        append_dvd_queue(name, note)
-        self.remove_from_skip_archive(name)
-        self.dvd_parked = load_dvd_queue_names()
-        self.refresh_list(select_index=idx)
-        self.status_var.set(f"DVD abgelegt: {name}")
 
     def delete_folder(self):
         name = self.selected_name()
@@ -909,6 +1119,9 @@ class TriageApp(tk.Tk):
         if name in self.pending:
             self.pending = [n for n in self.pending if n != name]
             save_pending(self.pending)
+        if name in self.manual_later:
+            remove_manual_later(name)
+            self.manual_later = load_manual_later_names()
         self.folders = scan_filme_folders()
         self.refresh_list(select_index=idx)
         self.status_var.set(f"Gelöscht: {name}")
@@ -1054,13 +1267,11 @@ class TriageApp(tk.Tk):
             cwd=str(SCRIPT_DIR),
             stdout=subprocess.PIPE,
             stderr=subprocess.STDOUT,
-            text=True,
-            bufsize=1,
         )
         assert proc.stdout is not None
         step = 0
-        for line in proc.stdout:
-            line = line.rstrip("\n")
+        for raw in proc.stdout:
+            line = raw.decode("utf-8", errors="replace").rstrip("\n")
             win.log(line)
             if line.startswith("Processing:") or line.startswith("[") and "]Processing:" in line.replace(" ", ""):
                 step += 1
