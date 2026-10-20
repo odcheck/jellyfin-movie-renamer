@@ -824,12 +824,19 @@ def expand_search_term_variants(term):
                 variants.append(variant)
     return variants
 
+def is_imdb_id_token(term):
+    """True when term is only an IMDb title id (tt#######), not a movie title."""
+    cleaned = clean_search_term(term or '')
+    return bool(re.fullmatch(r'tt\d{7,9}', cleaned, flags=re.IGNORECASE))
+
 def is_presentable_local_title(term):
     """Reject technical or placeholder strings as final display titles."""
     cleaned = clean_search_term(term)
     if not cleaned:
         return False
     if cleaned.lower() in {'true', 'false'}:
+        return False
+    if is_imdb_id_token(cleaned):
         return False
     words = normalize_title_for_match(cleaned)
     if not words or len(words) > 8:
@@ -971,6 +978,19 @@ def apply_preferred_output_title(movie_info, folder_name, metadata_titles=None, 
         if debug:
             print(f"  Using German title from Wikidata: {german_title}")
 
+    # Never ship an IMDb id as the display title (id-search recovery edge case).
+    if is_imdb_id_token(localized.get('title')):
+        fallback = None
+        for key in ('title_de', 'title_en'):
+            candidate = localized.get(key)
+            if candidate and not is_imdb_id_token(candidate):
+                fallback = candidate
+                break
+        if fallback:
+            localized['title'] = fallback
+            if debug:
+                print(f"  Replaced IMDb-id title with: {fallback}")
+
     return localized
 
 def fetch_imdb_details_from_search(imdb_id, search_terms, debug=False):
@@ -996,8 +1016,12 @@ def fetch_imdb_details_from_search(imdb_id, search_terms, debug=False):
             if candidate.get('imdb_id') != imdb_id:
                 continue
             candidate = dict(candidate)
-            candidate['title'] = choose_preferred_local_title(candidate, terms, matched_search_term=search_term)
-            candidate['title_de'] = candidate['title']
+            # Searching by IMDb id itself must keep the API title, not the id string.
+            if not is_imdb_id_token(search_term):
+                candidate['title'] = choose_preferred_local_title(
+                    candidate, terms, matched_search_term=search_term
+                )
+                candidate['title_de'] = candidate['title']
             if debug:
                 print(
                     f"  Recovered IMDb details for {imdb_id} from search term "
@@ -1809,6 +1833,15 @@ def normalize_extra_marker(value):
     normalized = re.sub(r'[^a-z0-9]+', '', normalized)
     return EXTRA_TYPE_ALIASES.get(normalized)
 
+# Short tokens that also appear inside real titles (e.g. love.other.drugs).
+# Only treat as extras when they are a whole folder name or a trailing marker.
+_AMBIGUOUS_EXTRA_TOKENS = frozenset({'other', 'short', 'scene', 'clip', 'extra', 'extras'})
+
+def _stem_without_year(stem):
+    cleaned = transliterate_german((stem or '').lower())
+    cleaned = re.sub(r'[\s._(-]*\(?((?:19|20)\d{2})\)?\s*$', '', cleaned)
+    return cleaned.strip('._- ')
+
 def detect_extra_type(rel_path, filename):
     """Detect whether a video file should be treated as a Jellyfin extra."""
     path_parts = [part for part in (rel_path or '').split(os.sep) if part and part != '.']
@@ -1819,22 +1852,25 @@ def detect_extra_type(rel_path, filename):
 
     stem = os.path.splitext(filename)[0]
     lowered_stem = transliterate_german(stem.lower())
-    pattern_map = [
+    cleaned = _stem_without_year(lowered_stem)
+
+    # Strong markers may appear mid-name.
+    strong_pattern_map = [
         ('behindthescenes', r'(?:(?:^|[\s._-])behind[\s._-]*the[\s._-]*scenes(?:$|[\s._-]))'),
         ('deletedscene', r'(?:(?:^|[\s._-])deleted[\s._-]*scenes?(?:$|[\s._-]))'),
         ('featurette', r'(?:(?:^|[\s._-])featurettes?(?:$|[\s._-]))'),
         ('interview', r'(?:(?:^|[\s._-])interviews?(?:$|[\s._-]))'),
-        ('trailer', r'(?:(?:^|[\s._-])trailer(?:$|[\s._-])| trailer$)'),
-        ('sample', r'(?:(?:^|[\s._-])sample(?:$|[\s._-])| sample$)'),
-        ('scene', r'(?:(?:^|[\s._-])scene(?:$|[\s._-]))'),
-        ('clip', r'(?:(?:^|[\s._-])clip(?:$|[\s._-]))'),
-        ('short', r'(?:(?:^|[\s._-])short(?:$|[\s._-]))'),
-        ('other', r'(?:(?:^|[\s._-])other(?:$|[\s._-]))'),
-        ('extra', r'(?:(?:^|[\s._-])extra(?:$|[\s._-])|(?:^|[\s._-])extras(?:$|[\s._-]))'),
+        ('trailer', r'(?:(?:^|[\s._-])trailer(?:$|[\s._-])|trailer$)'),
+        ('sample', r'(?:(?:^|[\s._-])sample(?:$|[\s._-])|sample$)'),
     ]
-    for extra_type, pattern in pattern_map:
+    for extra_type, pattern in strong_pattern_map:
         if re.search(pattern, lowered_stem):
             return extra_type
+
+    # Ambiguous tokens: whole name or trailing only (Movie-other / other.avi).
+    for token in _AMBIGUOUS_EXTRA_TOKENS:
+        if cleaned == token or re.search(rf'(?:^|[\s._-]){re.escape(token)}$', cleaned):
+            return EXTRA_TYPE_ALIASES.get(token, token)
     return None
 
 def classify_video_files(folder_path, video_files):
@@ -1864,6 +1900,13 @@ def classify_video_files(folder_path, video_files):
             ignored_files.append(file_info)
         else:
             main_files.append(file_info)
+
+    # Sole video wrongly tagged as extra (title word collision) → treat as main.
+    if not main_files and len(extra_files) == 1 and extra_files[0]['size'] >= MIN_MAIN_VIDEO_BYTES:
+        sole = dict(extra_files[0])
+        sole['extra_type'] = None
+        main_files = [sole]
+        extra_files = []
 
     return main_files, extra_files, ignored_files
 
@@ -1926,6 +1969,35 @@ def detect_special_skip_reason(folder_path, clue_years=None):
     if has_nested_dvd_structure(folder_path) and len(years) >= 2:
         return "Likely multi-movie DVD set with multiple years; skipping single-title rename"
     return None
+
+def build_movie_info_from_local_metadata(imdb_id, folder_name, metadata_titles=None, clue_years=None):
+    """
+    Build rename info from GUI/nfo when online IMDb lookup fails.
+    Authoritative: local imdb id + folder year + folder title (GUI-set name).
+    """
+    year = extract_year_from_folder_name(folder_name)
+    if not year:
+        for candidate in clue_years or []:
+            if re.fullmatch(r'(?:19|20)\d{2}', str(candidate)):
+                year = str(candidate)
+                break
+    # Prefer the GUI folder name over release-filename title noise.
+    title = clean_search_term(folder_name)
+    if not title:
+        for raw in metadata_titles or []:
+            cleaned = clean_search_term(raw)
+            if cleaned and not is_imdb_id_token(cleaned) and is_presentable_local_title(cleaned):
+                title = cleaned
+                break
+    if not title or not year or not imdb_id:
+        return None
+    return {
+        'title': title,
+        'title_de': title,
+        'title_en': title,
+        'year': str(year),
+        'imdb_id': imdb_id.lower(),
+    }
 
 def create_folder_name(movie_info):
     """Create Jellyfin-compliant folder name from lookup title and year."""
@@ -2005,23 +2077,35 @@ def rename_movie_folder(folder_name, base_path, debug=False):
             'reason': special_skip_reason,
         }
     
-    # Search IMDB
-    if len(metadata_imdb_ids) == 1:
+    # Search IMDB — a single local IMDb ID (GUI movie.nfo) is authoritative.
+    authoritative_imdb_id = metadata_imdb_ids[0] if len(metadata_imdb_ids) == 1 else None
+    movie_info = None
+    if authoritative_imdb_id:
         if debug:
-            print(f"  Using IMDb ID from metadata: {metadata_imdb_ids[0]}")
-        movie_info = fetch_imdb_movie_details(metadata_imdb_ids[0], debug=debug)
+            print(f"  Using IMDb ID from metadata: {authoritative_imdb_id}")
+        movie_info = fetch_imdb_movie_details(authoritative_imdb_id, debug=debug)
         if not movie_info:
             movie_info = fetch_imdb_details_from_search(
-                metadata_imdb_ids[0],
+                authoritative_imdb_id,
                 [folder_name] + metadata_titles + clue_terms,
                 debug=debug
             )
-        if not movie_info and debug:
-            print("  IMDb ID recovery failed, falling back to title-based search with metadata clues")
-    else:
-        movie_info = None
+        if not movie_info:
+            movie_info = build_movie_info_from_local_metadata(
+                authoritative_imdb_id,
+                folder_name,
+                metadata_titles=metadata_titles,
+                clue_years=clue_years,
+            )
+            if movie_info:
+                print(
+                    f"  Using local title/year with authoritative IMDb ID "
+                    f"{authoritative_imdb_id} (online lookup failed)"
+                )
+            elif debug:
+                print("  Authoritative IMDb ID present but title/year missing locally")
 
-    if not movie_info:
+    if not movie_info and not authoritative_imdb_id:
         movie_info = search_imdb(
             folder_name,
             folder_name,
