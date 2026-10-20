@@ -1,6 +1,6 @@
 # Jellyfin Movie Renamer
 
-Rename movie folders and movie files into a Jellyfin-friendly format using IMDb lookup, local metadata, and safe ambiguity handling.
+Rename movie folders and files into a Jellyfin-friendly format using IMDb lookup, local metadata, and safe ambiguity handling. Optional tools convert legacy disc/container media to MP4 and triage skipped folders in a GUI.
 
 ## What It Does
 
@@ -14,10 +14,14 @@ Rename movie folders and movie files into a Jellyfin-friendly format using IMDb 
 - Renames extras to Jellyfin-style suffixes, for example:
   - `Movie_Name (year) [imdbid-ttXXXXXX]-sample.ext`
   - `Movie_Name (year) [imdbid-ttXXXXXX]-trailer.ext`
+- Converts DivX / mpg / mpeg / DVD (`VIDEO_TS`) / ISO / ratDVD / Blu-ray `STREAM/*.m2ts` → MP4 (`media_to_mp4.py`)
+- Triages skipped folders in a GUI: set year/IMDb, queue pending renames, batch convert to MP4 (`skip_triage_gui.py`)
 
 ## Current Behavior
 
 - Uses IMDb lookup for title, year, and IMDb ID
+- A single IMDb ID in local metadata / `movie.nfo` (e.g. from the triage GUI) is authoritative; if online lookup fails, folder title + year are used with that ID
+- Never uses a bare `tt#######` string as the display title
 - Prefers German/localized titles when strong local evidence points to them
 - Reads local metadata from `.nfo`, `.txt`, and `.xml`
 - Extracts title clues, year clues, and direct `tt...` IMDb IDs from metadata files
@@ -26,13 +30,8 @@ Rename movie folders and movie files into a Jellyfin-friendly format using IMDb 
 - Finds video files in subfolders
 - Moves nested video files into the movie folder root
 - Removes empty subfolders after flattening
-- Treats `VIDEO_TS` folders like DVDs:
-  - rename folder
-  - keep DVD structure unchanged
-- Treats `.iso` files like DVDs:
-  - rename folder
-  - keep ISO file unchanged
-- Detects extras such as trailers, samples, clips, interviews, deleted scenes, featurettes, and other Jellyfin-supported extras
+- Treats `VIDEO_TS` / `.iso` like discs for rename (structure kept); convert to MP4 separately if desired
+- Detects extras (trailer, sample, interview, …); ambiguous tokens like `other` / `short` only count as extras when they are the whole name or a trailing marker (avoids `love.other.drugs`)
 - Ignores tiny main-video candidates under `100 MB`
 - Verifies real video files instead of trusting file extensions alone
 - Skips ambiguous matches instead of forcing bad renames
@@ -43,6 +42,7 @@ Rename movie folders and movie files into a Jellyfin-friendly format using IMDb 
 - `requests`
 - `beautifulsoup4`
 - `file` command available on the host for MIME-type verification
+- For `media_to_mp4.py`: `ffmpeg` / `ffprobe`; HandBrakeCLI (Flatpak `fr.handbrake.ghb` preferred, with `libdvdcss` for CSS DVDs); `7z`/`7za` as ISO extract fallback
 
 ## Installation
 
@@ -220,23 +220,68 @@ The script considers:
 
 If metadata strongly identifies the movie, that evidence is used.
 
+A single local `tt...` IMDb ID is treated as authoritative: online details are preferred, but rename can still proceed from folder title/year if IMDb is unreachable.
+
 If multiple plausible IMDb matches remain and there is not enough evidence to decide safely, the movie is skipped.
 
-## DVD / ISO Handling
+## DVD / ISO Handling (rename)
 
 ### VIDEO_TS
 
 If a folder contains a valid `VIDEO_TS` structure:
 
 - the movie folder can be renamed
-- `VIDEO_TS` contents are left unchanged
+- `VIDEO_TS` contents are left unchanged by the renamer
 
 ### ISO
 
 If a folder contains one or more `.iso` files:
 
 - the movie folder can be renamed
-- ISO files are left unchanged
+- ISO files are left unchanged by the renamer
+
+To turn discs/containers into a single MP4 first, use Media → MP4 below.
+
+## Media → MP4 (`media_to_mp4.py`)
+
+Converts legacy media in a movie folder to H.264/AAC MP4 (German audio preferred, no subtitles):
+
+| Source | Tool |
+| --- | --- |
+| `.divx` / `.mpg` / `.mpeg` | ffmpeg |
+| `VIDEO_TS` / flat IFO+VOB | HandBrake (+libdvdcss); ffmpeg VOB-concat fallback |
+| `.iso` / `.ISO` | HandBrake; on failure extract via 7z then DVD path |
+| `.ratDVD` | unpack → `VIDEO_TS` → same as DVD (XC format cannot convert) |
+| Blu-ray `STREAM/*.m2ts` | ffmpeg concat (playlist order when `.mpls` present) |
+
+```bash
+# one folder
+python3 media_to_mp4.py "/path/to/Movie (1965)"
+
+# dry-run / keep sources after convert
+python3 media_to_mp4.py --dry-run --keep-source "/path/to/Movie (1965)"
+
+# paths listed one per line
+python3 media_to_mp4.py --from-list ~/to_convert.txt
+```
+
+Output file: `Movie (1965)/Movie (1965).mp4`. HandBrake progress can contain non-UTF-8 bytes; the CLI and triage GUI decode with replacement so converts are not aborted mid-encode.
+
+## Skip Triage GUI (`skip_triage_gui.py`)
+
+Interactive triage for folders that landed in the skip archive:
+
+```bash
+python3 skip_triage_gui.py
+```
+
+Typical flow:
+
+1. Open a skipped folder — set year and/or IMDb ID → **Pending**
+2. If the folder still has ISO / DVD / DivX / mpg / ratDVD / m2ts → **→ mp4** (or **Batch Medien→mp4**)
+3. When format is OK (`mkv`/`mp4`/`avi`) → **Batch ×N** runs the renamer on pending titles
+
+Closing the GUI does not kill an in-flight HandBrake encode; stop leftover jobs with `pkill -f HandBrakeCLI` / `pkill -f media_to_mp4` if needed.
 
 ## Nested Video Handling
 
