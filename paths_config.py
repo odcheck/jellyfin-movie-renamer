@@ -1,5 +1,8 @@
 #!/usr/bin/env python3
-"""Shared Filme/Movies/Work paths: env > ~/.config/…/paths.json > ~/Filme etc."""
+"""Shared library paths: Filme (dirty source) → Movies (clean Jellyfin).
+
+Priority: env > ~/.config/…/paths.json > ~/Filme ~/Movies ~/filme_batch_work.
+"""
 from __future__ import annotations
 
 import json
