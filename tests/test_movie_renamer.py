@@ -46,6 +46,55 @@ class MovieRenamerTests(unittest.TestCase):
         self.assertTrue(self.mod.is_generic_imdb_title('Besetzung und Crew-Mitglieder'))
         self.assertFalse(self.mod.is_generic_imdb_title('Der letzte Exorzismus 2'))
 
+    def test_imdb_id_is_not_a_presentable_title(self):
+        self.assertTrue(self.mod.is_imdb_id_token('tt0057611'))
+        self.assertFalse(self.mod.is_presentable_local_title('tt0057611'))
+        candidate = {
+            'title': 'The Silence',
+            'title_en': 'The Silence',
+            'year': '1963',
+            'imdb_id': 'tt0057611',
+        }
+        chosen = self.mod.choose_preferred_local_title(
+            candidate,
+            ['tt0057611', 'Die Jungfrauenquelle Das Schweigen I'],
+            matched_search_term='tt0057611',
+        )
+        self.assertEqual(chosen, 'The Silence')
+
+    def test_apply_preferred_output_title_rejects_imdb_id_title(self):
+        movie_info = {
+            'title': 'tt0057611',
+            'title_de': 'Das Schweigen',
+            'title_en': 'The Silence',
+            'year': '1963',
+            'imdb_id': 'tt0057611',
+        }
+        with mock.patch.object(self.mod, 'fetch_wikidata_german_title', return_value=None):
+            localized = self.mod.apply_preferred_output_title(
+                movie_info,
+                'Die_JungfrauenquelleDas_SchweigenI (1963)',
+                metadata_titles=[],
+                clue_terms=[],
+                debug=False,
+            )
+        self.assertEqual(localized['title'], 'Das Schweigen')
+        self.assertEqual(self.mod.create_folder_name(localized), 'Das_Schweigen (1963)')
+
+        # title_de unusable (also an id) → fall back to English
+        movie_info_en = {
+            'title': 'tt0057611',
+            'title_de': 'tt0057611',
+            'title_en': 'The Silence',
+            'year': '1963',
+            'imdb_id': 'tt0057611',
+        }
+        with mock.patch.object(self.mod, 'fetch_wikidata_german_title', return_value=None):
+            localized_en = self.mod.apply_preferred_output_title(
+                movie_info_en, 'x', metadata_titles=[], clue_terms=[], debug=False
+            )
+        self.assertEqual(localized_en['title'], 'The Silence')
+
     def test_numeric_titles_do_not_match_wrong_number(self):
         self.assertEqual(
             self.mod.title_match_score('Ice Age 2', '2012: Ice Age'),
@@ -234,6 +283,29 @@ class MovieRenamerTests(unittest.TestCase):
         )
         self.assertIsNone(
             self.mod.detect_extra_type('', 'Wolverine Weg des Kriegers.avi')
+        )
+        # Title words must not become Jellyfin "other" extras
+        self.assertIsNone(
+            self.mod.detect_extra_type('', 'love.other.drugs.(2010).avi')
+        )
+        self.assertEqual(
+            self.mod.detect_extra_type('', 'Movie-other.avi'),
+            'other'
+        )
+
+    def test_authoritative_imdb_id_uses_local_title_when_online_fails(self):
+        info = self.mod.build_movie_info_from_local_metadata(
+            'tt0676184',
+            'Haus auf der Klippe (1990)',
+            metadata_titles=['Haus auf der Klippe'],
+            clue_years=['1990'],
+        )
+        self.assertEqual(info['imdb_id'], 'tt0676184')
+        self.assertEqual(info['year'], '1990')
+        self.assertEqual(info['title'], 'Haus auf der Klippe')
+        self.assertEqual(
+            self.mod.create_folder_name(info),
+            'Haus_auf_der_Klippe (1990)',
         )
 
     def test_franchise_number_helpers(self):
