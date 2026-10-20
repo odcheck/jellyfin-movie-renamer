@@ -81,10 +81,36 @@ sudo apt update
 sudo apt install python3 python3-requests python3-bs4 file
 ```
 
-Or with `pip`:
+Fedora:
+
+```bash
+sudo dnf install python3 python3-requests python3-beautifulsoup4 file
+```
+
+Homebrew (macOS / Linux):
+
+```bash
+brew install python
+pip3 install requests beautifulsoup4
+```
+
+Or with `pip` only:
 
 ```bash
 pip3 install requests beautifulsoup4
+```
+
+Optional tools for `media_to_mp4.py`:
+
+```bash
+# Debian/Ubuntu
+sudo apt install ffmpeg handbrake-cli p7zip-full
+
+# Fedora
+sudo dnf install ffmpeg HandBrake-cli p7zip p7zip-plugins
+
+# Homebrew
+brew install ffmpeg handbrake p7zip
 ```
 
 ## Library Paths
