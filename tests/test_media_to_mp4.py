@@ -88,7 +88,21 @@ class MediaToMp4Tests(unittest.TestCase):
             dest = folder / "out.mp4"
             with self.assertRaises(RuntimeError) as ctx:
                 self.mod.convert_video_ts(video_ts, dest, dry_run=False, keep_source=True)
-            self.assertIn("ratDVD XC", str(ctx.exception))
+            self.assertIn("ratDVD proprietary", str(ctx.exception))
+
+    def test_ratdvd_vsi_detected(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            folder = Path(tmp)
+            video_ts = folder / "VIDEO_TS"
+            video_ts.mkdir()
+            (video_ts / "VIDEO_TS.IFO").write_bytes(b"x")
+            (video_ts / "VTS_01_1.VOB").write_bytes(b"y")
+            (video_ts / "VTS_01_1.VSI").write_bytes(b"z")
+            self.assertTrue(self.mod.is_ratdvd_xc(folder))
+            dest = folder / "out.mp4"
+            with self.assertRaises(RuntimeError) as ctx:
+                self.mod.convert_video_ts(video_ts, dest, dry_run=False, keep_source=True)
+            self.assertIn("ratDVD proprietary", str(ctx.exception))
 
     def test_ordered_m2ts_from_mpls(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -132,6 +146,41 @@ class MediaToMp4Tests(unittest.TestCase):
                 with mock.patch.object(self.mod, "run", side_effect=fake_run):
                     ok = self.mod.convert_with_handbrake(src, dest, dry_run=False)
             self.assertTrue(ok)
+
+    def test_handbrake_scan_timeout_returns_false(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            src = Path(tmp) / "x.iso"
+            dest = Path(tmp) / "out.mp4"
+            src.write_bytes(b"iso")
+
+            def boom(*_a, **_k):
+                raise subprocess.TimeoutExpired(cmd=["HandBrakeCLI"], timeout=180)
+
+            with mock.patch.object(self.mod, "handbrake_cmd", return_value=["HandBrakeCLI"]):
+                with mock.patch.object(self.mod, "run", side_effect=boom):
+                    self.assertFalse(
+                        self.mod.convert_with_handbrake(src, dest, dry_run=False)
+                    )
+
+    def test_readable_vobs_skip_handbrake(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            video_ts = Path(tmp) / "VIDEO_TS"
+            video_ts.mkdir()
+            (video_ts / "VTS_01_1.VOB").write_bytes(b"vob")
+            dest = Path(tmp) / "out.mp4"
+            calls = []
+
+            with mock.patch.object(self.mod, "vobs_have_video", return_value=True):
+                with mock.patch.object(
+                    self.mod, "convert_video_ts_ffmpeg", side_effect=lambda *a, **k: calls.append("ff")
+                ):
+                    with mock.patch.object(
+                        self.mod, "convert_with_handbrake", side_effect=lambda *a, **k: calls.append("hb")
+                    ):
+                        self.mod.convert_video_ts(
+                            video_ts, dest, dry_run=False, keep_source=True
+                        )
+            self.assertEqual(calls, ["ff"])
 
     def test_iso_falls_back_when_handbrake_returns_false(self):
         with tempfile.TemporaryDirectory() as tmp:

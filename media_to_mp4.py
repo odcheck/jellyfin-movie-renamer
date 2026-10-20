@@ -148,13 +148,19 @@ def convert_with_handbrake(source: Path, dest_mp4: Path, dry_run: bool) -> bool:
         env["LD_LIBRARY_PATH"] = f"{css_dir}:{env.get('LD_LIBRARY_PATH', '')}"
 
     # DVD titles often aren't UTF-8; replace so scan output can't crash the convert.
-    scan = run(
-        scan_argv,
-        capture_output=True,
-        encoding="utf-8",
-        errors="replace",
-        env=env,
-    )
+    # ponytail: 3min scan cap — HandBrake -t 0 can spin forever on weird multi-title VIDEO_TS (NFS).
+    try:
+        scan = run(
+            scan_argv,
+            capture_output=True,
+            encoding="utf-8",
+            errors="replace",
+            env=env,
+            timeout=180,
+        )
+    except subprocess.TimeoutExpired:
+        print(f"  HandBrake scan timed out on {source} — caller may fallback")
+        return False
     text = (scan.stdout or "") + (scan.stderr or "")
     titles = parse_handbrake_scan(text)
     if not titles:
@@ -212,12 +218,21 @@ def find_ratdvds(folder: Path):
 
 
 def is_ratdvd_xc(folder: Path) -> bool:
-    """True when folder is a ratDVD XC unpack (XVO renamed to VOB — not real MPEG DVD)."""
+    """True when folder is a ratDVD unpack (XC / .VSI) — not real MPEG-DVD VOBs."""
     for ver in (folder / "Version.xml", folder.parent / "Version.xml"):
         try:
             if ver.is_file() and "<videoformat>XC</videoformat>" in ver.read_text(
                 encoding="utf-8", errors="ignore"
             ):
+                return True
+        except OSError:
+            pass
+    # Unpacked ratDVD leaves .VSI (+ StreamData.xml); video PID is proprietary, not MPEG.
+    for root in (folder, folder / "VIDEO_TS"):
+        if not root.is_dir():
+            continue
+        try:
+            if any(p.suffix.upper() == ".VSI" for p in root.iterdir() if p.is_file()):
                 return True
         except OSError:
             pass
@@ -568,20 +583,41 @@ def remove_dvd_source(video_ts: Path, dest_mp4: Path):
     print(f"  Removed {video_ts}")
 
 
+def vobs_have_video(video_ts: Path) -> bool:
+    """True if largest VTS has a real video codec ffmpeg can decode (not unknown/none)."""
+    vobs = largest_vts_vobs(video_ts)
+    if not vobs:
+        return False
+    for stream in ffprobe_streams(vobs[0]):
+        if stream.get("codec_type") != "video":
+            continue
+        name = (stream.get("codec_name") or "").lower()
+        if name and name not in {"unknown", "none"}:
+            return True
+    return False
+
+
 def convert_video_ts(video_ts: Path, dest_mp4: Path, dry_run: bool, keep_source: bool):
-    """Prefer HandBrake+libdvdcss on VIDEO_TS; else ffmpeg VOB concat."""
+    """ffmpeg when VOBs are readable; else HandBrake+libdvdcss; else ffmpeg again."""
     print(f"DVD: {video_ts} → {dest_mp4.name}")
     movie = video_ts.parent if video_ts.name.upper() == "VIDEO_TS" else video_ts
     if is_ratdvd_xc(movie) or is_ratdvd_xc(video_ts):
         raise RuntimeError(
-            f"ratDVD XC format in {movie.name} — HandBrake/ffmpeg cannot decode it. "
-            "Need original ratDVD app to expand to a real DVD, or the .ratDVD source."
+            f"ratDVD proprietary VIDEO_TS in {movie.name} (.VSI/XC) — "
+            "HandBrake/ffmpeg cannot decode it. Need the original .ratDVD "
+            "expanded with ratDVD to a real MPEG DVD, or another source."
         )
-    # Pass VIDEO_TS itself so HandBrake does not pick a sibling .mp4 in the parent folder.
-    used_hb = convert_with_handbrake(video_ts, dest_mp4, dry_run=dry_run)
-    if not used_hb:
-        print("  HandBrake skipped/failed — ffmpeg VOB concat (may fail on CSS DVDs)")
+    # Readable VOBs: skip HandBrake -t 0 (can spin forever on multi-title rips over NFS).
+    if dry_run or vobs_have_video(video_ts):
+        if not dry_run:
+            print("  VOBs readable — ffmpeg (skip HandBrake scan)")
         convert_video_ts_ffmpeg(video_ts, dest_mp4, dry_run=dry_run)
+    else:
+        # Pass VIDEO_TS itself so HandBrake does not pick a sibling .mp4 in the parent folder.
+        used_hb = convert_with_handbrake(video_ts, dest_mp4, dry_run=False)
+        if not used_hb:
+            print("  HandBrake skipped/failed — ffmpeg VOB concat (may fail on CSS DVDs)")
+            convert_video_ts_ffmpeg(video_ts, dest_mp4, dry_run=False)
 
     if not dry_run and not keep_source:
         remove_dvd_source(video_ts, dest_mp4)
