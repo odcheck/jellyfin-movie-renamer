@@ -14,6 +14,7 @@ Rename movie folders and files into a Jellyfin-friendly format using IMDb lookup
 - [Current Behavior](#current-behavior)
 - [Requirements](#requirements)
 - [Installation](#installation)
+- [Library Paths](#library-paths)
 - [Usage](#usage)
 - [Command-Line Options](#command-line-options)
 - [Default Files](#default-files)
@@ -86,6 +87,53 @@ Or with `pip`:
 pip3 install requests beautifulsoup4
 ```
 
+## Library Paths
+
+Triage GUI and batch scripts share one path config.
+
+| Path | Meaning | Default |
+| --- | --- | --- |
+| **Filme** | Inbox / unsorted movie folders | `~/Filme` |
+| **Movies** | Destination after successful rename | `~/Movies` |
+| **Work** | Skip archives, pending lists, batch scratch | `~/filme_batch_work` |
+
+**Priority:** environment variables → config file → defaults above.
+
+| Variable | Sets |
+| --- | --- |
+| `FILME` | Filme |
+| `MOVIES` | Movies |
+| `WORK_DIR` | Work |
+
+Config file (written by the GUI **Pfade speichern** button):
+
+```text
+~/.config/jellyfin-movie-renamer/paths.json
+```
+
+Example:
+
+```json
+{
+  "filme": "/path/to/Filme",
+  "movies": "/path/to/Movies",
+  "work": "/path/to/filme_batch_work"
+}
+```
+
+CLI overrides (same paths as the GUI):
+
+```bash
+./batch_filme_to_movies.sh --filme /path/to/Filme --movies /path/to/Movies --work /path/to/work
+./retry_skips.sh --filme /path/to/Filme --work /path/to/work
+```
+
+Inspect resolved paths:
+
+```bash
+python3 paths_config.py --print
+```
+
 ## Usage
 
 ### 1. Generate an Input File
@@ -93,13 +141,7 @@ pip3 install requests beautifulsoup4
 Scan a movie directory and create `movielist.txt`.
 
 ```bash
-python3 movie_renamer.py --generate-inputfile-from=/path/to/movies --fileoutput=/path/to/output
-```
-
-Example:
-
-```bash
-python3 movie_renamer.py --generate-inputfile-from=/path/to/Source --fileoutput=/home/your_username
+python3 movie_renamer.py --generate-inputfile-from=/path/to/Filme --fileoutput=/home/your_username
 ```
 
 This creates:
@@ -111,7 +153,7 @@ This creates:
 The generated file also stores the source folder in a header:
 
 ```text
-# BASE_PATH=/path/to/Source
+# BASE_PATH=/path/to/Filme
 ```
 
 That means a later `--input` run automatically knows where to look.
@@ -298,15 +340,17 @@ Output file: `Movie (1965)/Movie (1965).mp4`. HandBrake progress can contain non
 
 ## Skip Triage GUI (`skip_triage_gui.py`)
 
-Interactive triage for folders that landed in the skip archive:
+Interactive triage for folders under **Filme** (skips, convert, pending rename → **Movies**):
 
 ```bash
 python3 skip_triage_gui.py
 ```
 
+Set **Filme** / **Movies** / **Work** in the top row and click **Pfade speichern** (writes `~/.config/jellyfin-movie-renamer/paths.json`). Batch scripts pick up the same file. See [Library Paths](#library-paths).
+
 Typical flow:
 
-1. Open a skipped folder — set year and/or IMDb ID → **Pending**
+1. Open a folder — set year and/or IMDb ID → **Pending**
 2. If the folder still has ISO / DVD / DivX / mpg / [ratDVD](https://www.ratdvd.ca/) / m2ts → **→ mp4** (or **Batch Medien→mp4**)
 3. When format is OK (`mkv`/`mp4`/`avi`) → **Batch ×N** runs the renamer on pending titles
 
@@ -341,7 +385,7 @@ super_movie (1968)[imdbid-123456]-cd2.avi
 1. Generate a list:
 
 ```bash
-python3 movie_renamer.py --generate-inputfile-from=/path/to/Source --fileoutput=/home/your_username
+python3 movie_renamer.py --generate-inputfile-from=/path/to/Filme --fileoutput=/home/your_username
 ```
 
 2. Inspect with dry-run:
